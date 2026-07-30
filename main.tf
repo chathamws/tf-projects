@@ -25,8 +25,10 @@ resource "proxmox_virtual_environment_container" "managed_lxc" {
   initialization {
     hostname = "tf-managed-app"
 
-    # 2. Assign the secure password to the root user
-    password = var.container_root_password
+    # FIX: Move the password inside a dedicated user_account configuration block
+    user_account {
+      password = var.container_root_password
+    }
     
     ip_config {
       ipv4 {
