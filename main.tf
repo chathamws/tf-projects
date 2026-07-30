@@ -7,18 +7,16 @@ terraform {
   }
 }
 
-# These variables will be filled by GitHub environment variables automatically
 variable "pm_api_url" { type = string }
 variable "pm_api_token_id" { type = string }
 variable "pm_api_token_secret" { type = string }
 
 provider "proxmox" {
-  endpoint = var.pm_api_url
+  endpoint  = var.pm_api_url
   api_token = "${var.pm_api_token_id}=${var.pm_api_token_secret}"
-  insecure  = true # Set to false if you have a valid SSL certificate on Proxmox
+  insecure  = true 
 }
 
-# Example description of a target LXC you want to manage
 resource "proxmox_virtual_environment_container" "managed_lxc" {
   node_name    = "pve1" # Change to your exact Proxmox node name
   vm_id        = 200   # Change to an unused VM/LXC ID
@@ -34,8 +32,10 @@ resource "proxmox_virtual_environment_container" "managed_lxc" {
     }
   }
 
-  template {
-    # Path to an existing container template on your Proxmox storage
-    file_id = "local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst" 
+  # FIX: Replaced the old template block with the correct bpg structure
+  operating_system {
+    template_file_id = "local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst" 
+    type             = "ubuntu" # Optional, help provider identify OS type
   }
 }
+
