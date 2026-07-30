@@ -37,5 +37,11 @@ resource "proxmox_virtual_environment_container" "managed_lxc" {
     template_file_id = "local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst" 
     type             = "ubuntu" # Optional, help provider identify OS type
   }
+
+ # FIX: Tell Proxmox where to deploy the target container's system drive
+  disk {
+    datastore_id = "local-lvm" # <-- Change to your node's storage (e.g. local-lvm, local-zfs)
+    size         = 8           # Allocation size in GB
+  }
 }
 
