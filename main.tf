@@ -7,7 +7,6 @@ terraform {
   }
 }
 
-# Declared once, clearly separated
 variable "pm_api_url" { type = string }
 variable "pm_api_token_id" { type = string }
 variable "pm_api_token_secret" { type = string }
@@ -18,10 +17,10 @@ variable "container_root_password" {
 }
 
 provider "proxmox" {
-  endpoint                   = var.pm_api_url
-  api_token                  = "${var.pm_api_token_id}=${var.pm_api_token_secret}"
-  insecure                   = true 
-  ignore_subsequent_warnings = true
+  endpoint  = var.pm_api_url
+  api_token = "${var.pm_api_token_id}=${var.pm_api_token_secret}"
+  insecure  = true 
+  # FIX: Removed the unsupported ignore_subsequent_warnings argument
 }
 
 resource "proxmox_virtual_environment_container" "managed_lxc" {
@@ -53,6 +52,7 @@ resource "proxmox_virtual_environment_container" "managed_lxc" {
     size         = 8           
   }
 
+  # Enforced nesting will cleanly suppress the task warnings natively
   features {
     nesting = true
   }
