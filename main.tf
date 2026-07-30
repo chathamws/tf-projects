@@ -43,5 +43,12 @@ resource "proxmox_virtual_environment_container" "managed_lxc" {
     datastore_id = "local-lvm" # <-- Change to your node's storage (e.g. local-lvm, local-zfs)
     size         = 8           # Allocation size in GB
   }
+
+  # FIX: Suppresses the Systemd warning by preemptively enabling nesting
+  features {
+    nesting = true
+  }
+
+
 }
 
