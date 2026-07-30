@@ -15,6 +15,7 @@ jobs:
       TF_VAR_pm_api_url: ${{ secrets.PM_API_URL }}
       TF_VAR_pm_api_token_id: ${{ secrets.PM_API_TOKEN_ID }}
       TF_VAR_pm_api_token_secret: ${{ secrets.PM_API_TOKEN_SECRET }}
+      TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
 
     steps:
       - name: Checkout Code
