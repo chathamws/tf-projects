@@ -1,4 +1,4 @@
-name: "Proxmox Terraform Deploy"
+name: "Proxmox Terraform Deploy & Teardown"
 
 on:
   push:
@@ -9,68 +9,148 @@ on:
 
 jobs:
   detect-changes:
-    name: "Detect Modified Projects & Workspaces"
+    name: "Detect Modified & Deleted Projects"
     runs-on: self-hosted
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-      has_changes: ${{ steps.set-matrix.outputs.has_changes }}
+      deploy_matrix: ${{ steps.set-matrix.outputs.deploy_matrix }}
+      destroy_matrix: ${{ steps.set-matrix.outputs.destroy_matrix }}
+      has_deploys: ${{ steps.set-matrix.outputs.has_deploys }}
+      has_destroys: ${{ steps.set-matrix.outputs.has_destroys }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
-      - name: Find Changed Projects and Workspaces
+      - name: Parse Git Changes
         id: set-matrix
         run: |
-          # Get unique directory names under projects/ that changed
+          # 1. IDENTIFY LIVE MODIFIED/ADDED PROJECTS
           DIRS=$(git diff --name-only HEAD~1 HEAD | grep '^projects/' | cut -d'/' -f2 | sort -u)
           
-          if [ -z "$DIRS" ]; then
-            echo "matrix=[]" >> $GITHUB_OUTPUT
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "🔍 No project changes detected."
-          else
-            # Construct a valid JSON array of objects: [{"project":"a","workspace":"dev"}]
-            JSON_MATRIX="["
-            FOUND_VALID=0
-            
-            for dir in $DIRS; do
-              # Check if the directory actually exists in the workspace
-              if [ -d "projects/$dir" ]; then
-                # Find all .tfvars files inside this specific project folder
-                for tfvars_file in projects/$dir/*.tfvars; do
-                  if [ -f "$tfvars_file" ]; then
-                    # Extract the environment name (e.g., 'prod' from 'prod.tfvars')
-                    ws_name=$(basename "$tfvars_file" .tfvars)
-                    JSON_MATRIX="${JSON_MATRIX}{\"project\":\"${dir}\",\"workspace\":\"${ws_name}\"},"
-                    FOUND_VALID=1
-                  fi
-                done
-              fi
-            done
-            
-            if [ "$FOUND_VALID" -eq 1 ]; then
-              # Trim trailing comma and close the array bracket
-              JSON_MATRIX="${JSON_MATRIX%,}]"
-              echo "matrix=${JSON_MATRIX}" >> $GITHUB_OUTPUT
-              echo "has_changes=true" >> $GITHUB_OUTPUT
-              echo "🎯 Generated deployment matrix: ${JSON_MATRIX}"
-            else
-              echo "matrix=[]" >> $GITHUB_OUTPUT
-              echo "has_changes=false" >> $GITHUB_OUTPUT
-              echo "⚠️ Found changed folders, but no valid .tfvars files inside."
+          DEPLOY_JSON="["
+          FOUND_DEPLOY=0
+          
+          for dir in $DIRS; do
+            if [ -d "projects/$dir" ]; then
+              for tfvars_file in projects/$dir/*.tfvars; do
+                if [ -f "$tfvars_file" ]; then
+                  ws_name=$(basename "$tfvars_file" .tfvars)
+                  DEPLOY_JSON="${DEPLOY_JSON}{\"project\":\"${dir}\",\"workspace\":\"${ws_name}\"},"
+                  FOUND_DEPLOY=1
+                fi
+              done
             fi
+          done
+          
+          if [ "$FOUND_DEPLOY" -eq 1 ]; then
+            DEPLOY_JSON="${DEPLOY_JSON%,}]"
+            echo "deploy_matrix=${DEPLOY_JSON}" >> $GITHUB_OUTPUT
+            echo "has_deploys=true" >> $GITHUB_OUTPUT
+          else
+            echo "deploy_matrix=[]" >> $GITHUB_OUTPUT
+            echo "has_deploys=false" >> $GITHUB_OUTPUT
           fi
 
-  terraform:
-    name: "Terraform Apply (${{ matrix.config.project }} / ${{ matrix.config.workspace }})"
+          # 2. IDENTIFY DELETED PROJECTS
+          # Looks for folders that existed in the previous commit but are gone now
+          DESTROY_JSON="["
+          FOUND_DESTROY=0
+          
+          ALL_PAST_PROJECTS=$(git ls-tree --name-only HEAD~1 projects/ | cut -d'/' -f2 | sort -u)
+          for past_dir in $ALL_PAST_PROJECTS; do
+            if [ ! -d "projects/$past_dir" ]; then
+              # The directory was deleted! Find workspaces by looking at the previous commit history
+              PAST_TFVARS=$(git ls-tree --name-only HEAD~1 projects/$past_dir/ | grep '\.tfvars$' || true)
+              for tfvars_path in $PAST_TFVARS; do
+                ws_name=$(basename "$tfvars_path" .tfvars)
+                DESTROY_JSON="${DESTROY_JSON}{\"project\":\"${past_dir}\",\"workspace\":\"${ws_name}\"},"
+                FOUND_DESTROY=1
+              done
+            fi
+          done
+
+          if [ "$FOUND_DESTROY" -eq 1 ]; then
+            DESTROY_JSON="${DESTROY_JSON%,}]"
+            echo "destroy_matrix=${DESTROY_JSON}" >> $GITHUB_OUTPUT
+            echo "has_destroys=true" >> $GITHUB_OUTPUT
+            echo "🔥 Found deleted projects queued for destruction: ${DESTROY_JSON}"
+          else
+            echo "destroy_matrix=[]" >> $GITHUB_OUTPUT
+            echo "has_destroys=false" >> $GITHUB_OUTPUT
+          fi
+
+  terraform-destroy:
+    name: "Automated Teardown (${{ matrix.config.project }} / ${{ matrix.config.workspace }})"
     needs: detect-changes
-    if: needs.detect-changes.outputs.has_changes == 'true'
+    if: needs.detect-changes.outputs.has_destroys == 'true'
     runs-on: self-hosted
     strategy:
       matrix:
-        config: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+        config: ${{ fromJson(needs.detect-changes.outputs.destroy_matrix) }}
+      fail-fast: false
+
+    env:
+      TF_VAR_pm_api_url: ${{ secrets.PM_API_URL }}
+      TF_VAR_pm_api_token_id: ${{ secrets.PM_API_TOKEN_ID }}
+      TF_VAR_pm_api_token_secret: ${{ secrets.PM_API_TOKEN_SECRET }}
+      TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
+      STATE_DIR: "/home/github/persistent-tf-state/${{ matrix.config.project }}"
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Reconstruct Deleted Files for Destruction Context
+        run: |
+          # Create a temporary working sandbox folder since the original is deleted
+          mkdir -p "projects/${{ matrix.config.project }}"
+          
+          # Restore the core config files from the previous commit into the sandbox
+          git show HEAD~1:projects/${{ matrix.config.project }}/main.tf > projects/${{ matrix.config.project }}/main.tf
+          git show HEAD~1:projects/${{ matrix.config.project }}/variables.tf > projects/${{ matrix.config.project }}/variables.tf
+          git show HEAD~1:projects/${{ matrix.config.project }}/${{ matrix.config.workspace }}.tfvars > projects/${{ matrix.config.project }}/${{ matrix.config.workspace }}.tfvars
+
+      - name: Terraform Init
+        working-directory: ./projects/${{ matrix.config.project }}
+        run: |
+          terraform init \
+            -backend-config="path=${{ env.STATE_DIR }}/terraform.tfstate"
+
+      - name: Select Target Workspace
+        working-directory: ./projects/${{ matrix.config.project }}
+        run: |
+          terraform workspace select ${{ matrix.config.workspace }}
+
+      - name: Purge Infrastructure via Destroy
+        working-directory: ./projects/${{ matrix.config.project }}
+        run: |
+          terraform destroy -auto-approve -var-file="${{ matrix.config.workspace }}.tfvars"
+
+      - name: Delete Workspace Tracking and Local Orphans
+        if: always()
+        run: |
+          cd "projects/${{ matrix.config.project }}" || exit 0
+          terraform workspace select default || true
+          terraform workspace delete -force ${{ matrix.config.workspace }} || true
+          
+          # If all workspaces are destroyed, wipe out the old runner state directories
+          if [ ! -d "${{ env.STATE_DIR }}/terraform.tfstate.d" ]; then
+            rm -rf "${{ env.STATE_DIR }}"
+            echo "🧹 Permanently removed persistent state folder: ${{ env.STATE_DIR }}"
+          fi
+
+  terraform-deploy:
+    name: "Terraform Apply (${{ matrix.config.project }} / ${{ matrix.config.workspace }})"
+    needs: [detect-changes, terraform-destroy]
+    # Runs if there are deployments, even if a destroy job skipped or succeeded
+    if: always() && needs.detect-changes.outputs.has_deploys == 'true'
+    runs-on: self-hosted
+    strategy:
+      matrix:
+        config: ${{ fromJson(needs.detect-changes.outputs.deploy_matrix) }}
       fail-fast: false
     
     defaults:
