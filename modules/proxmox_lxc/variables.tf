@@ -27,7 +27,6 @@ variable "disk_size" {
   default = 8
 }
 
-# Added range boundaries for dynamic ID mapping
 variable "vm_id_range_start" {
   type    = number
   default = 200
