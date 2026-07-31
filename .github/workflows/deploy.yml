@@ -20,17 +20,24 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0 # FIX: Fetch full history so past file commits are fully visible
 
       - name: Parse Git Changes
         id: set-matrix
         run: |
+          BEFORE_SHA="${{ github.event.before }}"
+          # Fallback if it's a brand new branch with no previous commit history reference
+          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            BEFORE_SHA="HEAD~1"
+          fi
+
+          echo "🔍 Comparing current HEAD against previous baseline: $BEFORE_SHA"
+
           # 1. IDENTIFY LIVE MODIFIED/ADDED PROJECTS
-          DIRS=$(git diff --name-only HEAD~1 HEAD | grep '^projects/' | cut -d'/' -f2 | sort -u)
+          DIRS=$(git diff --name-only $BEFORE_SHA HEAD | grep '^projects/' | cut -d'/' -f2 | sort -u)
           
           DEPLOY_JSON="["
           FOUND_DEPLOY=0
-          
           for dir in $DIRS; do
             if [ -d "projects/$dir" ]; then
               for tfvars_file in projects/$dir/*.tfvars; do
@@ -56,10 +63,10 @@ jobs:
           DESTROY_JSON="["
           FOUND_DESTROY=0
           
-          ALL_PAST_PROJECTS=$(git ls-tree --name-only HEAD~1 projects/ | cut -d'/' -f2 | sort -u)
+          ALL_PAST_PROJECTS=$(git ls-tree --name-only $BEFORE_SHA projects/ | cut -d'/' -f2 | sort -u || true)
           for past_dir in $ALL_PAST_PROJECTS; do
-            if [ ! -d "projects/$past_dir" ]; then
-              PAST_TFVARS=$(git ls-tree --name-only HEAD~1 projects/$past_dir/ | grep '\.tfvars$' || true)
+            if [ ! -d "projects/$past_dir" ] && [ ! -z "$past_dir" ]; then
+              PAST_TFVARS=$(git ls-tree --name-only $BEFORE_SHA projects/$past_dir/ | grep '\.tfvars$' || true)
               for tfvars_path in $PAST_TFVARS; do
                 ws_name=$(basename "$tfvars_path" .tfvars)
                 DESTROY_JSON="${DESTROY_JSON}{\"project\":\"${past_dir}\",\"workspace\":\"${ws_name}\"},"
@@ -99,16 +106,19 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0 # FIX: Fetch full tree context for historical file rendering
 
       - name: Reconstruct Deleted Files for Destruction Context
         run: |
+          BEFORE_SHA="${{ github.event.before }}"
+          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            BEFORE_SHA="HEAD~1"
+          fi
+
           mkdir -p "projects/${{ matrix.config.project }}"
-          git show HEAD~1:projects/${{ matrix.config.project }}/main.tf > projects/${{ matrix.config.project }}/main.tf
-          git show HEAD~1:projects/${{ matrix.config.project }}/variables.tf > projects/${{ matrix.config.project }}/variables.tf
-          
-          # FIX: Explicit fallback extraction guarantees that historical environment specs are cleanly pulled
-          git show HEAD~1:projects/${{ matrix.config.project }}/${{ matrix.config.workspace }}.tfvars > projects/${{ matrix.config.project }}/${{ matrix.config.workspace }}.tfvars || echo "⚠️ Could not pull workspace file."
+          git show $BEFORE_SHA:projects/${{ matrix.config.project }}/main.tf > projects/${{ matrix.config.project }}/main.tf
+          git show $BEFORE_SHA:projects/${{ matrix.config.project }}/variables.tf > projects/${{ matrix.config.project }}/variables.tf
+          git show $BEFORE_SHA:projects/${{ matrix.config.project }}/${{ matrix.config.workspace }}.tfvars > projects/${{ matrix.config.project }}/${{ matrix.config.workspace }}.tfvars || echo "⚠️ Warning: Variable configuration extraction dropped."
 
       - name: Terraform Init
         working-directory: ./projects/${{ matrix.config.project }}
@@ -135,7 +145,7 @@ jobs:
           
           if [ ! -d "${{ env.STATE_DIR }}/terraform.tfstate.d" ]; then
             rm -rf "${{ env.STATE_DIR }}"
-            echo "🧹 Permanently removed persistent state folder: ${{ env.STATE_DIR }}"
+            echo "导 Permanently removed persistent state folder: ${{ env.STATE_DIR }}"
           fi
 
   terraform-deploy:
