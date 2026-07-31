@@ -122,7 +122,7 @@ jobs:
       - name: Select Target Workspace
         working-directory: ./projects/${{ matrix.config.project }}
         run: |
-          terraform workspace select ${{ matrix.config.workspace }}
+          terraform workspace select ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }}
 
       - name: Purge Infrastructure via Destroy
         working-directory: ./projects/${{ matrix.config.project }}
@@ -179,7 +179,7 @@ jobs:
 
       - name: Select or Create Workspace
         run: |
-          terraform workspace select ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }}
+          terraform workspace select ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }}
 
       - name: Terraform Plan
         run: |
