@@ -53,14 +53,12 @@ jobs:
           fi
 
           # 2. IDENTIFY DELETED PROJECTS
-          # Looks for folders that existed in the previous commit but are gone now
           DESTROY_JSON="["
           FOUND_DESTROY=0
           
           ALL_PAST_PROJECTS=$(git ls-tree --name-only HEAD~1 projects/ | cut -d'/' -f2 | sort -u)
           for past_dir in $ALL_PAST_PROJECTS; do
             if [ ! -d "projects/$past_dir" ]; then
-              # The directory was deleted! Find workspaces by looking at the previous commit history
               PAST_TFVARS=$(git ls-tree --name-only HEAD~1 projects/$past_dir/ | grep '\.tfvars$' || true)
               for tfvars_path in $PAST_TFVARS; do
                 ws_name=$(basename "$tfvars_path" .tfvars)
@@ -105,10 +103,7 @@ jobs:
 
       - name: Reconstruct Deleted Files for Destruction Context
         run: |
-          # Create a temporary working sandbox folder since the original is deleted
           mkdir -p "projects/${{ matrix.config.project }}"
-          
-          # Restore the core config files from the previous commit into the sandbox
           git show HEAD~1:projects/${{ matrix.config.project }}/main.tf > projects/${{ matrix.config.project }}/main.tf
           git show HEAD~1:projects/${{ matrix.config.project }}/variables.tf > projects/${{ matrix.config.project }}/variables.tf
           git show HEAD~1:projects/${{ matrix.config.project }}/${{ matrix.config.workspace }}.tfvars > projects/${{ matrix.config.project }}/${{ matrix.config.workspace }}.tfvars
@@ -122,6 +117,7 @@ jobs:
       - name: Select Target Workspace
         working-directory: ./projects/${{ matrix.config.project }}
         run: |
+          # FIX: Fallback sequence ensures a missing workspace doesn't crash initialization
           terraform workspace select ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }}
 
       - name: Purge Infrastructure via Destroy
@@ -136,7 +132,6 @@ jobs:
           terraform workspace select default || true
           terraform workspace delete -force ${{ matrix.config.workspace }} || true
           
-          # If all workspaces are destroyed, wipe out the old runner state directories
           if [ ! -d "${{ env.STATE_DIR }}/terraform.tfstate.d" ]; then
             rm -rf "${{ env.STATE_DIR }}"
             echo "🧹 Permanently removed persistent state folder: ${{ env.STATE_DIR }}"
@@ -145,7 +140,6 @@ jobs:
   terraform-deploy:
     name: "Terraform Apply (${{ matrix.config.project }} / ${{ matrix.config.workspace }})"
     needs: [detect-changes, terraform-destroy]
-    # Runs if there are deployments, even if a destroy job skipped or succeeded
     if: always() && needs.detect-changes.outputs.has_deploys == 'true'
     runs-on: self-hosted
     strategy:
@@ -179,7 +173,7 @@ jobs:
 
       - name: Select or Create Workspace
         run: |
-          terraform workspace select ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }}
+          terraform workspace select ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }}
 
       - name: Terraform Plan
         run: |
