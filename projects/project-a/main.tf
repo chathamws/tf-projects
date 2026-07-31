@@ -22,11 +22,8 @@ module "lxc_environment" {
   container_root_password = var.container_root_password
   cores                   = var.cores
   disk_size               = var.disk_size
-  vm_id_range_start       = var.vm_id_range_start
-  vm_id_range_end         = var.vm_id_range_end
 }
 
-# Expose outputs to the console log stream so GitHub Actions can parse them
 output "allocated_id" {
   value = module.lxc_environment.container_id
 }

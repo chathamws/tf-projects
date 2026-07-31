@@ -7,17 +7,10 @@ terraform {
   }
 }
 
-# Dynamically request the next open ID directly from the Proxmox cluster api
-data "proxmox_virtual_environment_cluster_next_vm_id" "next_id" {
-  range_start = var.vm_id_range_start
-  range_end   = var.vm_id_range_end
-}
-
+# The data source has been removed. By omitting the 'vm_id' attribute below,
+# the bpg/proxmox provider will natively find and auto-allocate an available ID.
 resource "proxmox_virtual_environment_container" "managed_lxc" {
   node_name    = var.node_name
-  
-  # Uses the discovered available ID from the cluster data source
-  vm_id        = data.proxmox_virtual_environment_cluster_next_vm_id.next_id.id
   unprivileged = true
 
   initialization {
@@ -54,10 +47,10 @@ resource "proxmox_virtual_environment_container" "managed_lxc" {
 # Output the assigned ID and container running status back to the parent project
 output "container_id" {
   value       = proxmox_virtual_environment_container.managed_lxc.vm_id
-  description = "The dynamically allocated VM/CT ID"
+  description = "The natively allocated VM/CT ID"
 }
 
 output "container_status" {
   value       = proxmox_virtual_environment_container.managed_lxc.started
-  description = "The execution or runtime power state status tracking flag"
+  description = "The execution runtime power status"
 }
