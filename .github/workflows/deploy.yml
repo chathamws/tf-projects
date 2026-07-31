@@ -1,4 +1,4 @@
-name: "Proxmox Terraform Deploy"
+name: Proxmox Terraform Deploy & Destroy
 
 on:
   push:
@@ -9,11 +9,13 @@ on:
 
 jobs:
   detect-changes:
-    name: "Detect Modified Projects & Workspaces"
+    name: Detect Modified & Deleted Projects
     runs-on: self-hosted
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-      has_changes: ${{ steps.set-matrix.outputs.has_changes }}
+      apply_matrix: ${{ steps.set-matrix.outputs.apply_matrix }}
+      has_apply: ${{ steps.set-matrix.outputs.has_apply }}
+      destroy_matrix: ${{ steps.set-matrix.outputs.destroy_matrix }}
+      has_destroy: ${{ steps.set-matrix.outputs.has_destroy }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -23,74 +25,137 @@ jobs:
       - name: Find Changed Projects and Workspaces
         id: set-matrix
         run: |
-          # Get unique directory names under projects/ that changed
-          DIRS=$(git diff --name-only HEAD~1 HEAD | grep '^projects/' | cut -d'/' -f2 | sort -u)
-          
-          if [ -z "$DIRS" ]; then
-            echo "matrix=[]" >> $GITHUB_OUTPUT
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "🔍 No project changes detected."
-          else
-            # Construct a valid JSON array of objects: [{"project":"a","workspace":"dev"}]
-            JSON_MATRIX="["
-            FOUND_VALID=0
-            
-            for dir in $DIRS; do
-              # Check if the directory actually exists in the workspace
-              if [ -d "projects/$dir" ]; then
-                # Find all .tfvars files inside this specific project folder
-                for tfvars_file in projects/$dir/*.tfvars; do
-                  if [ -f "$tfvars_file" ]; then
-                    # Extract the environment name (e.g., 'prod' from 'prod.tfvars')
-                    ws_name=$(basename "$tfvars_file" .tfvars)
-                    JSON_MATRIX="${JSON_MATRIX}{\"project\":\"${dir}\",\"workspace\":\"${ws_name}\"},"
-                    FOUND_VALID=1
-                  fi
-                done
+          # Fetch the diff status and file paths
+          CHANGES=$(git diff --name-status HEAD~1 HEAD | grep '^projects/')
+
+          APPLY_JSON="["
+          DESTROY_JSON="["
+          HAS_APPLY="false"
+          HAS_DESTROY="false"
+
+          if [ ! -z "$CHANGES" ]; then
+            # Read line by line to handle spaces securely
+            while IFS=$'\t' read -r status filepath; do
+              # Extract project directory and filename
+              # filepath looks like: projects/projectA/dev.tfvars
+              project=$(echo "$filepath" | cut -d/ -f2)
+              filename=$(echo "$filepath" | cut -d/ -f3)
+
+              # Only trigger on .tfvars changes or direct folder deletions
+              if [[ "$filename" == *.tfvars ]] || [ "$status" == "D" ]; then
+                
+                # Determine workspace name
+                if [[ "$filename" == *.tfvars ]]; then
+                  workspace=$(basename "$filename" .tfvars)
+                else
+                  workspace="default"
+                fi
+
+                # Check if the file/folder deletion or file modification occurred
+                if [ "$status" == "D" ] || [ ! -f "projects/$project/$filename" ]; then
+                  # Element was deleted -> Add to Destroy Matrix
+                  DESTROY_JSON="${DESTROY_JSON}{\"project\":\"${project}\",\"workspace\":\"${workspace}\"},"
+                  HAS_DESTROY="true"
+                else
+                  # Element was added/modified -> Add to Apply Matrix
+                  APPLY_JSON="${APPLY_JSON}{\"project\":\"${project}\",\"workspace\":\"${workspace}\"},"
+                  HAS_APPLY="true"
+                fi
               fi
-            done
-            
-            if [ "$FOUND_VALID" -eq 1 ]; then
-              # Trim trailing comma and close the array bracket
-              JSON_MATRIX="${JSON_MATRIX%,}]"
-              echo "matrix=${JSON_MATRIX}" >> $GITHUB_OUTPUT
-              echo "has_changes=true" >> $GITHUB_OUTPUT
-              echo "🎯 Generated deployment matrix: ${JSON_MATRIX}"
-            else
-              echo "matrix=[]" >> $GITHUB_OUTPUT
-              echo "has_changes=false" >> $GITHUB_OUTPUT
-              echo "⚠️ Found changed folders, but no valid .tfvars files inside."
-            fi
+            done <<< "$CHANGES"
           fi
 
-  terraform:
-    name: "Terraform Apply (${{ matrix.config.project }} / ${{ matrix.config.workspace }})"
+          # Clean up trailing commas and close JSON arrays
+          if [ "$HAS_APPLY" == "true" ]; then
+            APPLY_JSON="${APPLY_JSON%,}]"
+          else
+            APPLY_JSON="[]"
+          fi
+
+          if [ "$HAS_DESTROY" == "true" ]; then
+            DESTROY_JSON="${DESTROY_JSON%,}]"
+          else
+            DESTROY_JSON="[]"
+          fi
+
+          # Output variables to GitHub Actions
+          echo "apply_matrix=${APPLY_JSON}" >> $GITHUB_OUTPUT
+          echo "has_apply=${HAS_APPLY}" >> $GITHUB_OUTPUT
+          echo "destroy_matrix=${DESTROY_JSON}" >> $GITHUB_OUTPUT
+          echo "has_destroy=${HAS_DESTROY}" >> $GITHUB_OUTPUT
+
+          echo "🎯 Apply Matrix: ${APPLY_JSON}"
+          echo "🗑️ Destroy Matrix: ${DESTROY_JSON}"
+
+  terraform-destroy:
+    name: Terraform Destroy (${{ matrix.config.project }} / ${{ matrix.config.workspace }})
     needs: detect-changes
-    if: needs.detect-changes.outputs.has_changes == 'true'
+    if: needs.detect-changes.outputs.has_destroy == 'true'
     runs-on: self-hosted
     strategy:
       matrix:
-        config: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+        config: ${{ fromJson(needs.detect-changes.outputs.destroy_matrix) }}
       fail-fast: false
-    
     defaults:
       run:
         working-directory: ./projects/${{ matrix.config.project }}
-
     env:
       TF_VAR_pm_api_url: ${{ secrets.PM_API_URL }}
       TF_VAR_pm_api_token_id: ${{ secrets.PM_API_TOKEN_ID }}
       TF_VAR_pm_api_token_secret: ${{ secrets.PM_API_TOKEN_SECRET }}
       TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
-      STATE_DIR: "/home/github/persistent-tf-state/${{ matrix.config.project }}"
+      STATE_DIR: /home/github/persistent-tf-state/${{ matrix.config.project }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
+      # Re-create directory if the entire project folder was deleted in git
+      - name: Ensure Directory Exists for State Cleanup
+        run: mkdir -p ../${{ matrix.config.project }}
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="path=${{ env.STATE_DIR }}/terraform.tfstate"
+
+      - name: Select Workspace
+        run: terraform workspace select ${{ matrix.config.workspace }}
+
+      - name: Terraform Destroy
+        run: |
+          # If the tfvars file was deleted, we must destroy using the state values directly.
+          # Proxmox provider needs API credentials (handled via env vars) to kill LXC containers.
+          terraform destroy -auto-approve
+
+      - name: Clean up State Workspace
+        run: |
+          terraform workspace select default
+          terraform workspace delete ${{ matrix.config.workspace }} || true
+
+  terraform-apply:
+    name: Terraform Apply (${{ matrix.config.project }} / ${{ matrix.config.workspace }})
+    needs: [detect-changes, terraform-destroy]
+    if: always() && needs.detect-changes.outputs.has_apply == 'true'
+    runs-on: self-hosted
+    strategy:
+      matrix:
+        config: ${{ fromJson(needs.detect-changes.outputs.apply_matrix) }}
+      fail-fast: false
+    defaults:
+      run:
+        working-directory: ./projects/${{ matrix.config.project }}
+    env:
+      TF_VAR_pm_api_url: ${{ secrets.PM_API_URL }}
+      TF_VAR_pm_api_token_id: ${{ secrets.PM_API_TOKEN_ID }}
+      TF_VAR_pm_api_token_secret: ${{ secrets.PM_API_TOKEN_SECRET }}
+      TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
+      STATE_DIR: /home/github/persistent-tf-state/${{ matrix.config.project }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Initialize Local State Directory
-        run: |
-          mkdir -p "${{ env.STATE_DIR }}"
+        run: mkdir -p ${{ env.STATE_DIR }}
 
       - name: Terraform Init
         run: |
@@ -98,13 +163,10 @@ jobs:
             -backend-config="path=${{ env.STATE_DIR }}/terraform.tfstate"
 
       - name: Select or Create Workspace
-        run: |
-          terraform workspace select ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }}
+        run: terraform workspace select ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }}
 
       - name: Terraform Plan
-        run: |
-          terraform plan -var-file="${{ matrix.config.workspace }}.tfvars" -out=tfplan
+        run: terraform plan -var-file="${{ matrix.config.workspace }}.tfvars" -out=tfplan
 
       - name: Terraform Apply
-        run: |
-          terraform apply -auto-approve tfplan
+        run: terraform apply -auto-approve tfplan
