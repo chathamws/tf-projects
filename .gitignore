@@ -5,3 +5,5 @@
 crash.log
 *.tfvars
 .vscode/
+# Allow tracking environment configurations inside our project matrix folders
+!projects/**/*.tfvars
