@@ -21,18 +21,31 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # FIX: Pointed to a real, valid public GitHub HTTP state endpoint and escaped the variables correctly
-      - name: Terraform Init
+      # FIX: Link an existing tracking state file from the permanent local disk partition if it exists
+      - name: Link Persistent State File
         run: |
-          terraform init \
-            -backend-config="address=https://api.tfstate.dev/github/v1" \
-            -backend-config="lock_address=https://api.tfstate.dev/github/v1/lock" \
-            -backend-config="unlock_address=https://api.tfstate.dev/github/v1/lock" \
-            -backend-config="username=${{ github.repository }}" \
-            -backend-config="password=${{ secrets.GITHUB_TOKEN }}"
+          mkdir -p /home/github/persistent-tf-state
+          if [ -f /home/github/persistent-tf-state/terraform.tfstate ]; then
+            ln -sf /home/github/persistent-tf-state/terraform.tfstate ./terraform.tfstate
+            echo "✅ Swapped in existing persistent state tracking file."
+          fi
+
+      # FIX: Simplified initialization without external public URLs
+      - name: Terraform Init
+        run: terraform init
 
       - name: Terraform Plan
         run: terraform plan
 
       - name: Terraform Apply
         run: terraform apply -auto-approve
+
+      # FIX: Copy the newly generated infrastructure state details back to safety before clearing the workspace
+      - name: Save State Post-Apply
+        if: always()
+        run: |
+          if [ -f ./terraform.tfstate ]; then
+            cp -f ./terraform.tfstate /home/github/persistent-tf-state/terraform.tfstate
+            echo "💾 Securely stored updated state metadata onto persistent disk."
+          fi
+

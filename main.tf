@@ -5,8 +5,6 @@ terraform {
       version = "~> 0.70.0" 
     }
   }
-  # Tells Terraform to push state to an external HTTP URL
-  backend "http" {}
 }
 
 variable "pm_api_url" { type = string }
