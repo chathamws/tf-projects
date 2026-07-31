@@ -4,50 +4,80 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'projects/**'
 
 jobs:
+  detect-changes:
+    name: "Detect Modified Projects"
+    runs-on: self-hosted
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      has_changes: ${{ steps.set-matrix.outputs.has_changes }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Find Changed Projects
+        id: set-matrix
+        run: |
+          CHANGED_PROJECTS=$(git diff --name-only HEAD~1 HEAD | grep '^projects/' | cut -d'/' -f2 | sort -u | jq -R . | jq -s -c .)
+          
+          if [ "$CHANGED_PROJECTS" != "[]" ] && [ ! -z "$CHANGED_PROJECTS" ]; then
+            echo "matrix=${CHANGED_PROJECTS}" >> $GITHUB_OUTPUT
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "🎯 Found changes in projects: $CHANGED_PROJECTS"
+          else
+            echo "matrix=[]" >> $GITHUB_OUTPUT
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "🔍 No project changes detected."
+          fi
+
   terraform:
     name: "Terraform Apply"
-    runs-on: self-hosted # <--- Forces the job to run inside your home LXC
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: self-hosted
+    strategy:
+      matrix:
+        project: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+        workspace: [dev, prod]
+      fail-fast: false
     
+    defaults:
+      run:
+        working-directory: ./projects/${{ matrix.project }}
+
     env:
-      # Map GitHub secrets to environment variables that Terraform recognizes
       TF_VAR_pm_api_url: ${{ secrets.PM_API_URL }}
       TF_VAR_pm_api_token_id: ${{ secrets.PM_API_TOKEN_ID }}
       TF_VAR_pm_api_token_secret: ${{ secrets.PM_API_TOKEN_SECRET }}
       TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
+      STATE_DIR: "/home/github/persistent-tf-state/${{ matrix.project }}"
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Links the existing tracking file from the permanent local disk partition
-      - name: Link Persistent State File
+      - name: Initialize Local State Directory
         run: |
-          mkdir -p /home/github/persistent-tf-state
-          if [ -f /home/github/persistent-tf-state/terraform.tfstate ]; then
-            ln -sf /home/github/persistent-tf-state/terraform.tfstate ./terraform.tfstate
-            echo "✅ Swapped in existing persistent state tracking file."
-          fi
+          mkdir -p "${{ env.STATE_DIR }}"
 
       - name: Terraform Init
-        run: terraform init
+        run: |
+          terraform init \
+            -backend-config="path=${{ env.STATE_DIR }}/terraform.tfstate"
+
+      - name: Select or Create Workspace
+        run: |
+          terraform workspace select ${{ matrix.workspace }} || terraform workspace new ${{ matrix.workspace }}
 
       - name: Terraform Plan
-        run: terraform plan
+        run: |
+          terraform plan -var-file="${{ matrix.workspace }}.tfvars" -out=tfplan
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve
-
-      # FIX: Removed the broken 'cp' command. If a new state was generated, 
-      # copy it only if it's a real file, otherwise break the link cleanly.
-      - name: Save State Post-Apply
-        if: always()
         run: |
-          if [ -f ./terraform.tfstate ] && [ ! -L ./terraform.tfstate ]; then
-            cp -f ./terraform.tfstate /home/github/persistent-tf-state/terraform.tfstate
-            echo "💾 Securely stored new state metadata onto persistent disk."
-          elif [ -L ./terraform.tfstate ]; then
-            rm -f ./terraform.tfstate
-            echo "✅ Persistent state verified and link cleaned up safely."
-          fi
+          terraform apply -auto-approve tfplan
