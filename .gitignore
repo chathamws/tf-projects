@@ -1,0 +1,6 @@
+# Local terraform state directories and parameters
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars

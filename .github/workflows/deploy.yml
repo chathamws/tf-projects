@@ -21,8 +21,14 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      #- name: Terraform Init
+      #  run: terraform init
       - name: Terraform Init
-        run: terraform init
+        run: |
+          terraform init \
+            -backend-config="address=https://github.com{{ github.repository }}/actions/workflows/terraform-state" \
+            -backend-config="username=${{ github.actor }}" \
+            -backend-config="password=${{ secrets.GITHUB_TOKEN }}"
 
       - name: Terraform Plan
         run: terraform plan
