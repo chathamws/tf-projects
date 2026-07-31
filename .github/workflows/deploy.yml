@@ -9,7 +9,7 @@ on:
 
 jobs:
   detect-changes:
-    name: "Detect Modified Projects"
+    name: "Detect Modified Projects & Workspaces"
     runs-on: self-hosted
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
@@ -20,42 +20,69 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Find Changed Projects
+      - name: Find Changed Projects and Workspaces
         id: set-matrix
         run: |
-          CHANGED_PROJECTS=$(git diff --name-only HEAD~1 HEAD | grep '^projects/' | cut -d'/' -f2 | sort -u | jq -R . | jq -s -c .)
+          # Get unique directory names under projects/ that changed
+          DIRS=$(git diff --name-only HEAD~1 HEAD | grep '^projects/' | cut -d'/' -f2 | sort -u)
           
-          if [ "$CHANGED_PROJECTS" != "[]" ] && [ ! -z "$CHANGED_PROJECTS" ]; then
-            echo "matrix=${CHANGED_PROJECTS}" >> $GITHUB_OUTPUT
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "🎯 Found changes in projects: $CHANGED_PROJECTS"
-          else
+          if [ -z "$DIRS" ]; then
             echo "matrix=[]" >> $GITHUB_OUTPUT
             echo "has_changes=false" >> $GITHUB_OUTPUT
             echo "🔍 No project changes detected."
+          else
+            # Construct a valid JSON array of objects: [{"project":"a","workspace":"dev"}]
+            JSON_MATRIX="["
+            FOUND_VALID=0
+            
+            for dir in $DIRS; do
+              # Check if the directory actually exists in the workspace
+              if [ -d "projects/$dir" ]; then
+                # Find all .tfvars files inside this specific project folder
+                for tfvars_file in projects/$dir/*.tfvars; do
+                  if [ -f "$tfvars_file" ]; then
+                    # Extract the environment name (e.g., 'prod' from 'prod.tfvars')
+                    ws_name=$(basename "$tfvars_file" .tfvars)
+                    JSON_MATRIX="${JSON_MATRIX}{\"project\":\"${dir}\",\"workspace\":\"${ws_name}\"},"
+                    FOUND_VALID=1
+                  fi
+                done
+              fi
+            done
+            
+            if [ "$FOUND_VALID" -eq 1 ]; then
+              # Trim trailing comma and close the array bracket
+              JSON_MATRIX="${JSON_MATRIX%,}]"
+              echo "matrix=${JSON_MATRIX}" >> $GITHUB_OUTPUT
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+              echo "🎯 Generated deployment matrix: ${JSON_MATRIX}"
+            else
+              echo "matrix=[]" >> $GITHUB_OUTPUT
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+              echo "⚠️ Found changed folders, but no valid .tfvars files inside."
+            fi
           fi
 
   terraform:
-    name: "Terraform Apply"
+    name: "Terraform Apply (${{ matrix.config.project }} / ${{ matrix.config.workspace }})"
     needs: detect-changes
     if: needs.detect-changes.outputs.has_changes == 'true'
     runs-on: self-hosted
     strategy:
       matrix:
-        project: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
-        workspace: [dev, prod]
+        config: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
       fail-fast: false
     
     defaults:
       run:
-        working-directory: ./projects/${{ matrix.project }}
+        working-directory: ./projects/${{ matrix.config.project }}
 
     env:
       TF_VAR_pm_api_url: ${{ secrets.PM_API_URL }}
       TF_VAR_pm_api_token_id: ${{ secrets.PM_API_TOKEN_ID }}
       TF_VAR_pm_api_token_secret: ${{ secrets.PM_API_TOKEN_SECRET }}
       TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
-      STATE_DIR: "/home/github/persistent-tf-state/${{ matrix.project }}"
+      STATE_DIR: "/home/github/persistent-tf-state/${{ matrix.config.project }}"
 
     steps:
       - name: Checkout Code
@@ -72,11 +99,11 @@ jobs:
 
       - name: Select or Create Workspace
         run: |
-          terraform workspace select ${{ matrix.workspace }} || terraform workspace new ${{ matrix.workspace }}
+          terraform workspace select ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }}
 
       - name: Terraform Plan
         run: |
-          terraform plan -var-file="${{ matrix.workspace }}.tfvars" -out=tfplan
+          terraform plan -var-file="${{ matrix.config.workspace }}.tfvars" -out=tfplan
 
       - name: Terraform Apply
         run: |
