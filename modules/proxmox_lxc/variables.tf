@@ -3,6 +3,10 @@ variable "node_name" {
   default = "pve1"
 }
 
+variable "vm_id" {
+  type = number
+}
+
 variable "hostname" {
   type = string
 }
@@ -25,8 +29,4 @@ variable "cores" {
 variable "disk_size" {
   type    = number
   default = 8
-}
-
-variable "vm_id" {
-  type = number
 }

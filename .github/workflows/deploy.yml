@@ -1,4 +1,4 @@
-name: "Proxmox Terraform Deploy & Teardown Manager"
+name: "Proxmox Terraform Deploy"
 
 on:
   push:
@@ -6,80 +6,71 @@ on:
       - main
     paths:
       - 'projects/**'
-  workflow_dispatch:
-    inputs:
-      project:
-        description: "Project folder to target"
-        required: true
-        type: string
-        default: "project-a"
-      action:
-        description: "Choose Action"
-        required: true
-        type: choice
-        options:
-          - apply
-          - destroy
-      workspace:
-        description: "Choose Workspace (Manual actions only)"
-        required: true
-        type: choice
-        options:
-          - dev
-          - prod
-          - all
 
 jobs:
   detect-changes:
-    name: "Detect Modified Projects"
-    # FIX: Moving the push restriction to the top block enforces smooth output passing
-    if: github.event_name == 'push'
+    name: "Detect Modified Projects & Workspaces"
     runs-on: self-hosted
     outputs:
-      deploy_matrix: ${{ steps.set-matrix.outputs.deploy_matrix }}
-      has_deploys: ${{ steps.set-matrix.outputs.has_deploys }}
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      has_changes: ${{ steps.set-matrix.outputs.has_changes }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
-      - name: Parse Git Changes
+      - name: Find Changed Projects and Workspaces
         id: set-matrix
         run: |
+          # Get unique directory names under projects/ that changed
           DIRS=$(git diff --name-only HEAD~1 HEAD | grep '^projects/' | cut -d'/' -f2 | sort -u)
           
-          DEPLOY_JSON="["
-          FOUND_DEPLOY=0
-          for dir in $DIRS; do
-            if [ -d "projects/$dir" ]; then
-              for tfvars_file in projects/$dir/*.tfvars; do
-                if [ -f "$tfvars_file" ]; then
-                  ws_name=$(basename "$tfvars_file" .tfvars)
-                  DEPLOY_JSON="${DEPLOY_JSON}{\"project\":\"${dir}\",\"workspace\":\"${ws_name}\"},"
-                  FOUND_DEPLOY=1
-                fi
-              done
-            fi
-          done
-          
-          if [ "$FOUND_DEPLOY" -eq 1 ]; then
-            DEPLOY_JSON="${DEPLOY_JSON%,}]"
-            echo "deploy_matrix=${DEPLOY_JSON}" >> $GITHUB_OUTPUT
-            echo "has_deploys=true" >> $GITHUB_OUTPUT
-            echo "🎯 Generated deployment matrix: ${DEPLOY_JSON}"
+          if [ -z "$DIRS" ]; then
+            echo "matrix=[]" >> $GITHUB_OUTPUT
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "🔍 No project changes detected."
           else
-            echo "deploy_matrix=[]" >> $GITHUB_OUTPUT
-            echo "has_deploys=false" >> $GITHUB_OUTPUT
+            # Construct a valid JSON array of objects: [{"project":"a","workspace":"dev"}]
+            JSON_MATRIX="["
+            FOUND_VALID=0
+            
+            for dir in $DIRS; do
+              # Check if the directory actually exists in the workspace
+              if [ -d "projects/$dir" ]; then
+                # Find all .tfvars files inside this specific project folder
+                for tfvars_file in projects/$dir/*.tfvars; do
+                  if [ -f "$tfvars_file" ]; then
+                    # Extract the environment name (e.g., 'prod' from 'prod.tfvars')
+                    ws_name=$(basename "$tfvars_file" .tfvars)
+                    JSON_MATRIX="${JSON_MATRIX}{\"project\":\"${dir}\",\"workspace\":\"${ws_name}\"},"
+                    FOUND_VALID=1
+                  fi
+                done
+              fi
+            done
+            
+            if [ "$FOUND_VALID" -eq 1 ]; then
+              # Trim trailing comma and close the array bracket
+              JSON_MATRIX="${JSON_MATRIX%,}]"
+              echo "matrix=${JSON_MATRIX}" >> $GITHUB_OUTPUT
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+              echo "🎯 Generated deployment matrix: ${JSON_MATRIX}"
+            else
+              echo "matrix=[]" >> $GITHUB_OUTPUT
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+              echo "⚠️ Found changed folders, but no valid .tfvars files inside."
+            fi
           fi
 
-  automated-apply:
-    name: "Automated Apply (${{ matrix.config.project }} / ${{ matrix.config.workspace }})"
+  terraform:
+    name: "Terraform Apply (${{ matrix.config.project }} / ${{ matrix.config.workspace }})"
     needs: detect-changes
-    # FIX: Simplified condition evaluates correctly now that detect-changes outputs flow properly
-    if: needs.detect-changes.outputs.has_deploys == 'true'
+    if: needs.detect-changes.outputs.has_changes == 'true'
     runs-on: self-hosted
     strategy:
       matrix:
-        config: ${{ fromJson(needs.detect-changes.outputs.deploy_matrix) }}
+        config: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
       fail-fast: false
     
     defaults:
@@ -98,7 +89,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Initialize Local State Directory
-        run: mkdir -p "${{ env.STATE_DIR }}"
+        run: |
+          mkdir -p "${{ env.STATE_DIR }}"
 
       - name: Terraform Init
         run: |
@@ -106,66 +98,13 @@ jobs:
             -backend-config="path=${{ env.STATE_DIR }}/terraform.tfstate"
 
       - name: Select or Create Workspace
-        run: terraform workspace select ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }}
+        run: |
+          terraform workspace select ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }}
 
       - name: Terraform Plan
-        run: terraform plan -var-file="${{ matrix.config.workspace }}.tfvars" -out=tfplan
+        run: |
+          terraform plan -var-file="${{ matrix.config.workspace }}.tfvars" -out=tfplan
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
-
-  manual-management:
-    name: "Manual Actions (${{ github.event.inputs.project }} / ${{ github.event.inputs.action }})"
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: self-hosted
-    
-    defaults:
-      run:
-        working-directory: ./projects/${{ github.event.inputs.project }}
-
-    env:
-      TF_VAR_pm_api_url: ${{ secrets.PM_API_URL }}
-      TF_VAR_pm_api_token_id: ${{ secrets.PM_API_TOKEN_ID }}
-      TF_VAR_pm_api_token_secret: ${{ secrets.PM_API_TOKEN_SECRET }}
-      TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
-      STATE_DIR: "/home/github/persistent-tf-state/${{ github.event.inputs.project }}"
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Initialize Local State Directory
-        run: mkdir -p "${{ env.STATE_DIR }}"
-
-      - name: Terraform Init
         run: |
-          terraform init \
-            -backend-config="path=${{ env.STATE_DIR }}/terraform.tfstate"
-
-      - name: Execute Manual Action Loop
-        run: |
-          if [ "${{ github.event.inputs.workspace }}" = "all" ]; then
-            WORKSPACES=("dev" "prod")
-          else
-            WORKSPACES=("${{ github.event.inputs.workspace }}")
-          fi
-          
-          for ws in "${WORKSPACES[@]}"; do
-            echo "🚀 Selecting Workspace: $ws"
-            terraform workspace select $ws || terraform workspace new $ws
-            
-            if [ "${{ github.event.inputs.action }}" = "apply" ]; then
-              terraform apply -auto-approve -var-file="${ws}.tfvars"
-            elif [ "${{ github.event.inputs.action }}" = "destroy" ]; then
-              echo "🔥 RUNNING DESTROY FOR WORKSPACE: $ws"
-              terraform destroy -auto-approve -var-file="${ws}.tfvars"
-              
-              terraform workspace select default || true
-              terraform workspace delete -force $ws || true
-            fi
-          done
-          
-          if [ "${{ github.event.inputs.action }}" = "destroy" ] && [ "${{ github.event.inputs.workspace }}" = "all" ]; then
-            rm -rf "${{ env.STATE_DIR }}"
-            echo "🧹 Erased local tracking store completely."
-          fi
+          terraform apply -auto-approve tfplan

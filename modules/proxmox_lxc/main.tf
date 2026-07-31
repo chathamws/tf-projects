@@ -42,8 +42,3 @@ resource "proxmox_virtual_environment_container" "managed_lxc" {
     nesting = true
   }
 }
-
-output "container_id" {
-  value       = proxmox_virtual_environment_container.managed_lxc.vm_id
-  description = "The allocated VM/CT ID"
-}

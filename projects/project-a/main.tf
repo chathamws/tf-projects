@@ -5,6 +5,8 @@ terraform {
       version = "~> 0.70.0"
     }
   }
+
+  # This empty block enables dynamic state path overrides
   backend "local" {}
 }
 
@@ -17,15 +19,10 @@ provider "proxmox" {
 module "lxc_environment" {
   source = "../../modules/proxmox_lxc"
 
-  # Added the missing argument assignment here
   vm_id                   = var.vm_id
   hostname                = var.hostname
   ip_address              = var.ip_address
   container_root_password = var.container_root_password
   cores                   = var.cores
   disk_size               = var.disk_size
-}
-
-output "allocated_id" {
-  value = module.lxc_environment.container_id
 }
