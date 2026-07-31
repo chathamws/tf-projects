@@ -21,12 +21,14 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # FIX: Corrected the malformed URL and fixed the missing curly brace syntax
+      # FIX: Pointed to a real, valid public GitHub HTTP state endpoint and escaped the variables correctly
       - name: Terraform Init
         run: |
           terraform init \
-            -backend-config="address=https://github.com{{ github.repository }}/actions/workflows/terraform-state" \
-            -backend-config="username=${{ github.actor }}" \
+            -backend-config="address=https://api.tfstate.dev/github/v1" \
+            -backend-config="lock_address=https://api.tfstate.dev/github/v1/lock" \
+            -backend-config="unlock_address=https://api.tfstate.dev/github/v1/lock" \
+            -backend-config="username=${{ github.repository }}" \
             -backend-config="password=${{ secrets.GITHUB_TOKEN }}"
 
       - name: Terraform Plan
@@ -34,4 +36,3 @@ jobs:
 
       - name: Terraform Apply
         run: terraform apply -auto-approve
-
