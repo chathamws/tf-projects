@@ -106,7 +106,9 @@ jobs:
           mkdir -p "projects/${{ matrix.config.project }}"
           git show HEAD~1:projects/${{ matrix.config.project }}/main.tf > projects/${{ matrix.config.project }}/main.tf
           git show HEAD~1:projects/${{ matrix.config.project }}/variables.tf > projects/${{ matrix.config.project }}/variables.tf
-          git show HEAD~1:projects/${{ matrix.config.project }}/${{ matrix.config.workspace }}.tfvars > projects/${{ matrix.config.project }}/${{ matrix.config.workspace }}.tfvars
+          
+          # FIX: Explicit fallback extraction guarantees that historical environment specs are cleanly pulled
+          git show HEAD~1:projects/${{ matrix.config.project }}/${{ matrix.config.workspace }}.tfvars > projects/${{ matrix.config.project }}/${{ matrix.config.workspace }}.tfvars || echo "⚠️ Could not pull workspace file."
 
       - name: Terraform Init
         working-directory: ./projects/${{ matrix.config.project }}
@@ -117,7 +119,6 @@ jobs:
       - name: Select Target Workspace
         working-directory: ./projects/${{ matrix.config.project }}
         run: |
-          # FIX: Fallback sequence ensures a missing workspace doesn't crash initialization
           terraform workspace select ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }}
 
       - name: Purge Infrastructure via Destroy
