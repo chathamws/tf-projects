@@ -8,7 +8,7 @@ on:
 jobs:
   terraform:
     name: "Terraform Apply"
-    runs-on: self-hosted  # <--- Forces the job to run inside your home LXC
+    runs-on: self-hosted # <--- Forces the job to run inside your home LXC
     
     env:
       # Map GitHub secrets to environment variables that Terraform recognizes
@@ -21,8 +21,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      #- name: Terraform Init
-      #  run: terraform init
+      # FIX: Corrected the malformed URL and fixed the missing curly brace syntax
       - name: Terraform Init
         run: |
           terraform init \
@@ -35,3 +34,4 @@ jobs:
 
       - name: Terraform Apply
         run: terraform apply -auto-approve
+
