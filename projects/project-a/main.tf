@@ -5,6 +5,9 @@ terraform {
       version = "~> 0.70.0"
     }
   }
+
+  # This empty block enables dynamic state path overrides
+  backend "local" {}
 }
 
 provider "proxmox" {
