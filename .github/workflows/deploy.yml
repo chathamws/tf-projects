@@ -21,7 +21,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # FIX: Link an existing tracking state file from the permanent local disk partition if it exists
+      # Links the existing tracking file from the permanent local disk partition
       - name: Link Persistent State File
         run: |
           mkdir -p /home/github/persistent-tf-state
@@ -30,7 +30,6 @@ jobs:
             echo "✅ Swapped in existing persistent state tracking file."
           fi
 
-      # FIX: Simplified initialization without external public URLs
       - name: Terraform Init
         run: terraform init
 
@@ -40,12 +39,15 @@ jobs:
       - name: Terraform Apply
         run: terraform apply -auto-approve
 
-      # FIX: Copy the newly generated infrastructure state details back to safety before clearing the workspace
+      # FIX: Removed the broken 'cp' command. If a new state was generated, 
+      # copy it only if it's a real file, otherwise break the link cleanly.
       - name: Save State Post-Apply
         if: always()
         run: |
-          if [ -f ./terraform.tfstate ]; then
+          if [ -f ./terraform.tfstate ] && [ ! -L ./terraform.tfstate ]; then
             cp -f ./terraform.tfstate /home/github/persistent-tf-state/terraform.tfstate
-            echo "💾 Securely stored updated state metadata onto persistent disk."
+            echo "💾 Securely stored new state metadata onto persistent disk."
+          elif [ -L ./terraform.tfstate ]; then
+            rm -f ./terraform.tfstate
+            echo "✅ Persistent state verified and link cleaned up safely."
           fi
-
