@@ -52,6 +52,10 @@ resource "proxmox_virtual_environment_container" "managed_lxc" {
     size         = 8           
   }
 
+  cpu {
+    cores = 2 # Change from default to 2 cores
+  }
+
   # Enforced nesting will cleanly suppress the task warnings natively
   features {
     nesting = true
