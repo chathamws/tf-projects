@@ -2,27 +2,26 @@ variable "pm_api_url" { type = string }
 variable "pm_api_token_id" { type = string }
 variable "pm_api_token_secret" { type = string }
 
-variable "container_root_password" { 
+variable "container_root_password" {
   type      = string
-  sensitive = true 
+  sensitive = true
 }
 
 variable "hostname" { type = string }
 
-variable "ip_address" { 
+variable "ip_address" {
   type    = string
-  default = "dhcp" 
+  default = "dhcp"
 }
 
-variable "cores" { 
+variable "cores" {
   type    = number
-  default = 1 
+  default = 1
 }
 
-variable "disk_size" { 
+variable "disk_size" {
   type    = number
-  default = 8 
+  default = 8
 }
 
-variable "vm_id_range_start" { type = number }
-variable "vm_id_range_end" { type = number }
+variable "vm_id" { type = number }

@@ -7,10 +7,9 @@ terraform {
   }
 }
 
-# The data source has been removed. By omitting the 'vm_id' attribute below,
-# the bpg/proxmox provider will natively find and auto-allocate an available ID.
 resource "proxmox_virtual_environment_container" "managed_lxc" {
   node_name    = var.node_name
+  vm_id        = var.vm_id
   unprivileged = true
 
   initialization {
@@ -44,13 +43,7 @@ resource "proxmox_virtual_environment_container" "managed_lxc" {
   }
 }
 
-# Output the assigned ID and container running status back to the parent project
 output "container_id" {
   value       = proxmox_virtual_environment_container.managed_lxc.vm_id
-  description = "The natively allocated VM/CT ID"
-}
-
-output "container_status" {
-  value       = proxmox_virtual_environment_container.managed_lxc.started
-  description = "The execution runtime power status"
+  description = "The allocated VM/CT ID"
 }

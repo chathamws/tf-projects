@@ -27,12 +27,6 @@ variable "disk_size" {
   default = 8
 }
 
-variable "vm_id_range_start" {
-  type    = number
-  default = 200
-}
-
-variable "vm_id_range_end" {
-  type    = number
-  default = 299
+variable "vm_id" {
+  type = number
 }
