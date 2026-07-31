@@ -21,7 +21,7 @@ on:
           - apply
           - destroy
       workspace:
-        description: "Choose Workspace (Only applies if running a manual action)"
+        description: "Choose Workspace (Manual actions only)"
         required: true
         type: choice
         options:
@@ -32,6 +32,7 @@ on:
 jobs:
   detect-changes:
     name: "Detect Modified Projects"
+    # FIX: Moving the push restriction to the top block enforces smooth output passing
     if: github.event_name == 'push'
     runs-on: self-hosted
     outputs:
@@ -64,6 +65,7 @@ jobs:
             DEPLOY_JSON="${DEPLOY_JSON%,}]"
             echo "deploy_matrix=${DEPLOY_JSON}" >> $GITHUB_OUTPUT
             echo "has_deploys=true" >> $GITHUB_OUTPUT
+            echo "🎯 Generated deployment matrix: ${DEPLOY_JSON}"
           else
             echo "deploy_matrix=[]" >> $GITHUB_OUTPUT
             echo "has_deploys=false" >> $GITHUB_OUTPUT
@@ -72,7 +74,8 @@ jobs:
   automated-apply:
     name: "Automated Apply (${{ matrix.config.project }} / ${{ matrix.config.workspace }})"
     needs: detect-changes
-    if: github.event_name == 'push' && needs.detect-changes.outputs.has_deploys == 'true'
+    # FIX: Simplified condition evaluates correctly now that detect-changes outputs flow properly
+    if: needs.detect-changes.outputs.has_deploys == 'true'
     runs-on: self-hosted
     strategy:
       matrix:
@@ -157,13 +160,11 @@ jobs:
               echo "🔥 RUNNING DESTROY FOR WORKSPACE: $ws"
               terraform destroy -auto-approve -var-file="${ws}.tfvars"
               
-              # Force state file tracking cleanup
               terraform workspace select default || true
               terraform workspace delete -force $ws || true
             fi
           done
           
-          # Clean up folder state entirely if action was a comprehensive wipeout
           if [ "${{ github.event.inputs.action }}" = "destroy" ] && [ "${{ github.event.inputs.workspace }}" = "all" ]; then
             rm -rf "${{ env.STATE_DIR }}"
             echo "🧹 Erased local tracking store completely."
