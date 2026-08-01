@@ -18,11 +18,14 @@ jobs:
       - name: Scan Infrastructure Directories
         id: set-matrix
         run: |
+          # 💎 FIXED: A completely clean, foolproof string extraction method for jq
           JSON_OUTPUT=$(find projects -type f -name "*.tfvars" | jq -R -s -c '
-            split("\n") | map(select(length > 0)) | map({
-              project_dir: (split("/")[:-1] | join("/")),
-              env: (split("/")[-1] | split("."))
-            })
+            split("\n") 
+            | map(select(length > 0)) 
+            | map({
+                project_dir: (split("/") | slice(0; length - 1) | join("/")),
+                env: (split("/")[-1] | sub("\\.tfvars$"; ""))
+              })
           ')
           echo "matrix=$JSON_OUTPUT" >> $GITHUB_OUTPUT
 
