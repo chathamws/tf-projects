@@ -10,7 +10,11 @@ terraform {
 variable "pm_api_url" { type = string }
 variable "pm_api_token_id" { type = string }
 variable "pm_api_token_secret" { type = string }
-variable "container_root_password" { type = string; sensitive = true }
+
+variable "container_root_password" { 
+  type      = string 
+  sensitive = true 
+}
 
 provider "proxmox" {
   endpoint  = var.pm_api_url
@@ -20,7 +24,7 @@ provider "proxmox" {
 
 resource "proxmox_virtual_environment_container" "managed_lxc" {
   node_name    = "pve1"
-  # vm_id is removed entirely to trigger native Proxmox auto-assignment [1]
+  # vm_id is omitted entirely to trigger native Proxmox auto-assignment
   unprivileged = true
 
   initialization {
