@@ -13,11 +13,9 @@ resource "proxmox_virtual_environment_container" "managed_lxc" {
 
   initialization {
     hostname = var.hostname
-    
     user_account {
       password = var.container_root_password
     }
-    
     ip_config {
       ipv4 {
         address = "dhcp"
@@ -41,5 +39,12 @@ resource "proxmox_virtual_environment_container" "managed_lxc" {
 
   features {
     nesting = true
+  }
+
+  # 💎 ADD THIS LIFECYCLE GUARD TO STOP THE GHOST REBOOTS
+  lifecycle {
+    ignore_changes = [
+      initialization[0].user_account
+    ]
   }
 }
