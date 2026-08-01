@@ -12,18 +12,18 @@ variable "pm_api_token_id" { type = string }
 variable "pm_api_token_secret" { type = string }
 
 variable "container_root_password" { 
-  type      = string 
+  type = string 
   sensitive = true 
 }
 
 provider "proxmox" {
-  endpoint  = var.pm_api_url
+  endpoint = var.pm_api_url
   api_token = "${var.pm_api_token_id}=${var.pm_api_token_secret}"
-  insecure  = true
+  insecure = true
 }
 
 resource "proxmox_virtual_environment_container" "managed_lxc" {
-  node_name    = "pve1"
+  node_name = "pve1"
   # vm_id is omitted entirely to trigger native Proxmox auto-assignment
   unprivileged = true
 
