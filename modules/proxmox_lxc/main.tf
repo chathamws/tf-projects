@@ -45,7 +45,7 @@ resource "proxmox_virtual_environment_container" "managed_lxc" {
   lifecycle {
     ignore_changes = [
       initialization[0].user_account,
-      initialization.ip_config
+      initialization[0].ip_config
     ]
   }
 }
