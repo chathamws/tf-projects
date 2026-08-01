@@ -41,16 +41,16 @@ resource "proxmox_virtual_environment_container" "managed_lxc" {
 
   operating_system {
     template_file_id = "local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst"
-    type             = "ubuntu"
+    type = "ubuntu"
   }
 
   disk {
     datastore_id = "local-lvm"
-    size         = 8
+    size = 8
   }
 
   cpu {
-    cores = 2
+    cores = 1
   }
 
   features {
