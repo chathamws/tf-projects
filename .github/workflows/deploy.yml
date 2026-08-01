@@ -29,7 +29,7 @@ jobs:
             split("\n") 
             | map(select(length > 0)) 
             | map(split(":")) 
-            | map({project_dir: .[0], env: .[1]})
+            | map({project_dir: ., env: .})
           ')
           echo "matrix=$JSON_OUTPUT" >> $GITHUB_OUTPUT
 
@@ -115,7 +115,6 @@ jobs:
           find "$BASE_STATE_DIR" -type f -name "*.tfstate" | while read -r state_path; do
             
             # Extract project directory and environment name from the hard disk path
-            # Example path: /home/github/persistent-tf-state/projects/app-cluster/dev.tfstate
             RELATIVE_PATH=$(echo "$state_path" | sed "s|$BASE_STATE_DIR/||")
             PROJECT_NAME=$(dirname "$RELATIVE_PATH")
             ENV_NAME=$(basename "$RELATIVE_PATH" .tfstate)
@@ -135,14 +134,13 @@ jobs:
               # Copy the ghost state file directly into the folder to let terraform find it
               cp -f "$state_path" "./$ENV_NAME.tfstate"
               
-              # Run destroy to wipe the container from your Proxmox node completely
-              # Note: We pass a blank string to variables since the .tfvars file doesn't exist anymore
+              # 💎 FIXED: Pass valid dummy settings (1 core, 1 GB disk) to pass provider validation check rules during destroy
               terraform destroy \
                 -state="$ENV_NAME.tfstate" \
                 -var="target_node=dummy" \
                 -var="hostname=dummy" \
-                -var="disk_size_gb=0" \
-                -var="cpu_cores=0" \
+                -var="disk_size_gb=1" \
+                -var="cpu_cores=1" \
                 -auto-approve
               
               # Delete the persistent state backup file so it never loops again
@@ -155,4 +153,3 @@ jobs:
               echo "✅ Workspace configuration verified as active in repository."
             fi
           done
-          
