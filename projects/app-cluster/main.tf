@@ -1,5 +1,8 @@
+# projects/app-cluster/main.tf
+
 module "app_lxc" {
-  source = "../../../modules/proxmox_lxc"
+  # Fixes the path traversal bug by using the absolute root path token
+  source = "${path.root}/../../modules/proxmox_lxc"
 
   target_node             = var.target_node
   hostname                = var.hostname
