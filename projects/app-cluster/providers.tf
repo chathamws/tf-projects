@@ -1,4 +1,5 @@
 terraform {
+  required_version = ">= 1.5.0"
   required_providers {
     proxmox = {
       source  = "bpg/proxmox"
@@ -8,7 +9,5 @@ terraform {
 }
 
 provider "proxmox" {
-  # Endpoints and tokens are completely empty here.
-  # They will be read natively from PROXMOX_VE_* environment variables.
-  insecure = true 
+  insecure = true
 }
