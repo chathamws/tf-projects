@@ -6,48 +6,94 @@ on:
       - main
 
 jobs:
+  discover:
+    name: "Discover Projects"
+    runs-on: self-hosted
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Scan Infrastructure Directories
+        id: set-matrix
+        run: |
+          # 💎 FIXED: Combines stable bash file-mapping with standard compliant jq parsing
+          JSON_OUTPUT=$(find projects -type f -name "*.tfvars" | while read -r file; do
+            DIR=$(dirname "$file")
+            FILE_NAME=$(basename "$file")
+            ENV="${FILE_NAME%.tfvars}"
+            echo "$DIR:$ENV"
+          done | jq -R -s -c '
+            split("\n") 
+            | map(select(length > 0)) 
+            | map(split(":")) 
+            | map({project_dir: .[0], env: .[1]})
+          ')
+          echo "matrix=$JSON_OUTPUT" >> $GITHUB_OUTPUT
+
   terraform:
-    name: "Terraform Apply"
-    runs-on: self-hosted # <--- Forces the job to run inside your home LXC
-    
+    name: "Deploy"
+    needs: discover
+    runs-on: self-hosted
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # Sequentially processes dev, then prod
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.matrix) }}
+        
     env:
-      # Map GitHub secrets to environment variables that Terraform recognizes
-      TF_VAR_pm_api_url: ${{ secrets.PM_API_URL }}
-      TF_VAR_pm_api_token_id: ${{ secrets.PM_API_TOKEN_ID }}
-      TF_VAR_pm_api_token_secret: ${{ secrets.PM_API_TOKEN_SECRET }}
+      PROXMOX_VE_ENDPOINT: ${{ secrets.PM_API_URL }}
+      PROXMOX_VE_API_TOKEN: "${{ secrets.PM_API_TOKEN_ID }}=${{ secrets.PM_API_TOKEN_SECRET }}"
       TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
+      
+      LOCAL_STATE_FILE: "${{ matrix.env }}.tfstate"
+      PERSISTENT_STATE_DIR: "/home/github/persistent-tf-state/${{ matrix.project_dir }}"
+      PERSISTENT_STATE_FILE: "/home/github/persistent-tf-state/${{ matrix.project_dir }}/${{ matrix.env }}.tfstate"
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.project_dir }} # Managed globally here
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Links the existing tracking file from the permanent local disk partition
-      - name: Link Persistent State File
+      - name: Restore Persistent State File
         run: |
-          mkdir -p /home/github/persistent-tf-state
-          if [ -f /home/github/persistent-tf-state/terraform.tfstate ]; then
-            ln -sf /home/github/persistent-tf-state/terraform.tfstate ./terraform.tfstate
-            echo "✅ Swapped in existing persistent state tracking file."
+          # Safe absolute check - injects previous run parameters natively into the active workspace folder
+          if [ -f "${{ env.PERSISTENT_STATE_FILE }}" ]; then
+            cp -f "${{ env.PERSISTENT_STATE_FILE }}" "./${{ env.LOCAL_STATE_FILE }}"
+            echo "✅ Successfully restored matching state track file: ./${{ env.LOCAL_STATE_FILE }}"
+          else
+            echo "ℹ️ No persistent state discovered on local disk path. Starting fresh deployment."
           fi
 
       - name: Terraform Init
         run: terraform init
 
       - name: Terraform Plan
-        run: terraform plan
+        run: |
+          terraform plan \
+            -var-file="${{ matrix.env }}.tfvars" \
+            -state="${{ env.LOCAL_STATE_FILE }}"
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve
+        run: |
+          # Removed redundant "cd" command so execution path matches file placement
+          terraform apply \
+            -var-file="${{ matrix.env }}.tfvars" \
+            -state="${{ env.LOCAL_STATE_FILE }}" \
+            -auto-approve
 
-      # FIX: Removed the broken 'cp' command. If a new state was generated, 
-      # copy it only if it's a real file, otherwise break the link cleanly.
       - name: Save State Post-Apply
         if: always()
         run: |
-          if [ -f ./terraform.tfstate ] && [ ! -L ./terraform.tfstate ]; then
-            cp -f ./terraform.tfstate /home/github/persistent-tf-state/terraform.tfstate
-            echo "💾 Securely stored new state metadata onto persistent disk."
-          elif [ -L ./terraform.tfstate ]; then
-            rm -f ./terraform.tfstate
-            echo "✅ Persistent state verified and link cleaned up safely."
+          # Persist state changes back to disk
+          if [ -f "./${{ env.LOCAL_STATE_FILE }}" ]; then
+            mkdir -p "${{ env.PERSISTENT_STATE_DIR }}"
+            cp -f "./${{ env.LOCAL_STATE_FILE }}" "${{ env.PERSISTENT_STATE_FILE }}"
+            echo "💾 Securely stored state metadata onto persistent runner disk."
+          else
+            echo "⚠️ State tracking file ./${{ env.LOCAL_STATE_FILE }} missing. Skip storage loop."
           fi
