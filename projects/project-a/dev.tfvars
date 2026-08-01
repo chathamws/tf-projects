@@ -1,5 +1,5 @@
 vm_id     = 200
 hostname  = "project-a-dev"
-cores     = 1
+cores     = 2
 disk_size = 8
 
