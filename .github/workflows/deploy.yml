@@ -4,107 +4,50 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'projects/**'
 
 jobs:
-  detect-changes:
-    name: "Detect Modified Projects & Workspaces"
-    runs-on: self-hosted
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-      has_changes: ${{ steps.set-matrix.outputs.has_changes }}
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Find Changed Projects and Workspaces
-        id: set-matrix
-        run: |
-          # Get unique directory names under projects/ that changed
-          DIRS=$(git diff --name-only HEAD~1 HEAD | grep '^projects/' | cut -d'/' -f2 | sort -u)
-          
-          if [ -z "$DIRS" ]; then
-            echo "matrix=[]" >> $GITHUB_OUTPUT
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "🔍 No project changes detected."
-          else
-            # Construct a valid JSON array of objects: [{"project":"a","workspace":"dev"}]
-            JSON_MATRIX="["
-            FOUND_VALID=0
-            
-            for dir in $DIRS; do
-              # Check if the directory actually exists in the workspace
-              if [ -d "projects/$dir" ]; then
-                # Find all .tfvars files inside this specific project folder
-                for tfvars_file in projects/$dir/*.tfvars; do
-                  if [ -f "$tfvars_file" ]; then
-                    # Extract the environment name (e.g., 'prod' from 'prod.tfvars')
-                    ws_name=$(basename "$tfvars_file" .tfvars)
-                    JSON_MATRIX="${JSON_MATRIX}{\"project\":\"${dir}\",\"workspace\":\"${ws_name}\"},"
-                    FOUND_VALID=1
-                  fi
-                done
-              fi
-            done
-            
-            if [ "$FOUND_VALID" -eq 1 ]; then
-              # Trim trailing comma and close the array bracket
-              JSON_MATRIX="${JSON_MATRIX%,}]"
-              echo "matrix=${JSON_MATRIX}" >> $GITHUB_OUTPUT
-              echo "has_changes=true" >> $GITHUB_OUTPUT
-              echo "🎯 Generated deployment matrix: ${JSON_MATRIX}"
-            else
-              echo "matrix=[]" >> $GITHUB_OUTPUT
-              echo "has_changes=false" >> $GITHUB_OUTPUT
-              echo "⚠️ Found changed folders, but no valid .tfvars files inside."
-            fi
-          fi
-
   terraform:
-    name: "Terraform Apply (${{ matrix.config.project }} / ${{ matrix.config.workspace }})"
-    needs: detect-changes
-    if: needs.detect-changes.outputs.has_changes == 'true'
-    runs-on: self-hosted
-    strategy:
-      matrix:
-        config: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
-      fail-fast: false
+    name: "Terraform Apply"
+    runs-on: self-hosted # <--- Forces the job to run inside your home LXC
     
-    defaults:
-      run:
-        working-directory: ./projects/${{ matrix.config.project }}
-
     env:
+      # Map GitHub secrets to environment variables that Terraform recognizes
       TF_VAR_pm_api_url: ${{ secrets.PM_API_URL }}
       TF_VAR_pm_api_token_id: ${{ secrets.PM_API_TOKEN_ID }}
       TF_VAR_pm_api_token_secret: ${{ secrets.PM_API_TOKEN_SECRET }}
       TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
-      STATE_DIR: "/home/github/persistent-tf-state/${{ matrix.config.project }}"
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Initialize Local State Directory
+      # Links the existing tracking file from the permanent local disk partition
+      - name: Link Persistent State File
         run: |
-          mkdir -p "${{ env.STATE_DIR }}"
+          mkdir -p /home/github/persistent-tf-state
+          if [ -f /home/github/persistent-tf-state/terraform.tfstate ]; then
+            ln -sf /home/github/persistent-tf-state/terraform.tfstate ./terraform.tfstate
+            echo "✅ Swapped in existing persistent state tracking file."
+          fi
 
       - name: Terraform Init
-        run: |
-          terraform init \
-            -backend-config="path=${{ env.STATE_DIR }}/terraform.tfstate"
-
-      - name: Select or Create Workspace
-        run: |
-          terraform workspace select ${{ matrix.config.workspace }} || terraform workspace new ${{ matrix.config.workspace }}
+        run: terraform init
 
       - name: Terraform Plan
-        run: |
-          terraform plan -var-file="${{ matrix.config.workspace }}.tfvars" -out=tfplan
+        run: terraform plan
 
       - name: Terraform Apply
+        run: terraform apply -auto-approve
+
+      # FIX: Removed the broken 'cp' command. If a new state was generated, 
+      # copy it only if it's a real file, otherwise break the link cleanly.
+      - name: Save State Post-Apply
+        if: always()
         run: |
-          terraform apply -auto-approve tfplan
+          if [ -f ./terraform.tfstate ] && [ ! -L ./terraform.tfstate ]; then
+            cp -f ./terraform.tfstate /home/github/persistent-tf-state/terraform.tfstate
+            echo "💾 Securely stored new state metadata onto persistent disk."
+          elif [ -L ./terraform.tfstate ]; then
+            rm -f ./terraform.tfstate
+            echo "✅ Persistent state verified and link cleaned up safely."
+          fi
