@@ -1,4 +1,4 @@
 vm_id     = 201
 hostname  = "project-a-prod"
-cores     = 2
+cores     = 1
 disk_size = 20
