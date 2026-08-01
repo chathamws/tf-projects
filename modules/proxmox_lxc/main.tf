@@ -44,7 +44,8 @@ resource "proxmox_virtual_environment_container" "managed_lxc" {
   # 💎 ADD THIS LIFECYCLE GUARD TO STOP THE GHOST REBOOTS
   lifecycle {
     ignore_changes = [
-      initialization[0].user_account
+      initialization[0].user_account,
+      initialization.ip_config
     ]
   }
 }
