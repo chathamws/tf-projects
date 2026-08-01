@@ -6,7 +6,6 @@ on:
       - main
 
 jobs:
-  # JOB 1: Automatically find all projects and their environment files
   discover:
     name: "Discover Projects"
     runs-on: self-hosted
@@ -19,34 +18,30 @@ jobs:
       - name: Scan Infrastructure Directories
         id: set-matrix
         run: |
-          # Finds all *.tfvars files under projects/
-          # Extracts the project folder and the exact environment name cleanly into JSON
           JSON_OUTPUT=$(find projects -type f -name "*.tfvars" | jq -R -s -c '
             split("\n") | map(select(length > 0)) | map({
               project_dir: (split("/")[:-1] | join("/")),
-              env: (split("/")[-1] | split(".")[0])
+              env: (split("/")[-1] | split("."))[0]
             })
           ')
-          echo "Discovered configuration targets: $JSON_OUTPUT"
           echo "matrix=$JSON_OUTPUT" >> $GITHUB_OUTPUT
 
-  # JOB 2: Run deployment loops using the dynamically generated matrix data
   terraform:
     name: "Deploy"
     needs: discover
     runs-on: self-hosted
     strategy:
-      fail-fast: false # A failure in one project wont stop unrelated project jobs
+      fail-fast: false
+      max-parallel: 1 # 👈 Keeps the runner operations strictly sequential
       matrix:
         include: ${{ fromJson(needs.discover.outputs.matrix) }}
         
     env:
-      # Native bpg/proxmox environment variable layout
       PROXMOX_VE_ENDPOINT: ${{ secrets.PM_API_URL }}
       PROXMOX_VE_API_TOKEN: "${{ secrets.PM_API_TOKEN_ID }}=${{ secrets.PM_API_TOKEN_SECRET }}"
       TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
       
-      # Dynamically derived tracking variables
+      # Correct tracking variables matching your flat folder
       LOCAL_STATE_FILE: "${{ matrix.env }}.tfstate"
       PERSISTENT_STATE_DIR: "/home/github/persistent-tf-state/${{ matrix.project_dir }}"
       PERSISTENT_STATE_FILE: "/home/github/persistent-tf-state/${{ matrix.project_dir }}/${{ matrix.env }}.tfstate"
@@ -61,12 +56,11 @@ jobs:
 
       - name: Restore Persistent State File
         run: |
-          # Inject prior deployment state mapping if it exists on disk
           if [ -f "${{ env.PERSISTENT_STATE_FILE }}" ]; then
             cp -f "${{ env.PERSISTENT_STATE_FILE }}" "./${{ env.LOCAL_STATE_FILE }}"
-            echo "✅ Successfully restored existing state file for environmental target: ${{ matrix.env }}"
+            echo "✅ Successfully restored existing state tracking file: ${{ env.LOCAL_STATE_FILE }}"
           else
-            echo "ℹ️ No existing persistent state discovered. Starting raw generation block."
+            echo "ℹ️ No existing state discovered. Creating new track metadata."
           fi
 
       - name: Terraform Init
@@ -88,9 +82,11 @@ jobs:
       - name: Save State Post-Apply
         if: always()
         run: |
-          # Copy the state securely back to long term file tracking
+          # 💎 FIXED: Target the dynamic local environment state filename instead of standard terraform.tfstate
           if [ -f "./${{ env.LOCAL_STATE_FILE }}" ]; then
             mkdir -p "${{ env.PERSISTENT_STATE_DIR }}"
             cp -f "./${{ env.LOCAL_STATE_FILE }}" "${{ env.PERSISTENT_STATE_FILE }}"
             echo "💾 Securely stored new state metadata onto persistent disk location."
+          else
+            echo "⚠️ Warning: Targeted state file ./${{ env.LOCAL_STATE_FILE }} was not found!"
           fi
