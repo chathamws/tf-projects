@@ -1,4 +1,4 @@
-name: "Proxmox Terraform Deploy"
+name: "Proxmox Terraform Deploy & Prune"
 
 on:
   push:
@@ -6,48 +6,152 @@ on:
       - main
 
 jobs:
+  # STEP 1: Scan the repository for active project configuration targets
+  discover:
+    name: "Discover Projects"
+    runs-on: self-hosted
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Scan Infrastructure Directories
+        id: set-matrix
+        run: |
+          # Finds all *.tfvars files under projects/ and creates clean JSON blocks
+          JSON_OUTPUT=$(find projects -type f -name "*.tfvars" | while read -r file; do
+            DIR=$(dirname "$file")
+            FILE_NAME=$(basename "$file")
+            ENV="${FILE_NAME%.tfvars}"
+            echo "$DIR:$ENV"
+          done | jq -R -s -c '
+            split("\n") 
+            | map(select(length > 0)) 
+            | map(split(":")) 
+            | map({project_dir: .[0], env: .[1]})
+          ')
+          echo "matrix=$JSON_OUTPUT" >> $GITHUB_OUTPUT
+
+  # STEP 2: Deploy or update all active infrastructure targets
   terraform:
-    name: "Terraform Apply"
-    runs-on: self-hosted # <--- Forces the job to run inside your home LXC
-    
+    name: "Deploy"
+    needs: discover
+    runs-on: self-hosted
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # Sequentially processes targets to avoid Proxmox API collision
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.matrix) }}
+        
     env:
-      # Map GitHub secrets to environment variables that Terraform recognizes
-      TF_VAR_pm_api_url: ${{ secrets.PM_API_URL }}
-      TF_VAR_pm_api_token_id: ${{ secrets.PM_API_TOKEN_ID }}
-      TF_VAR_pm_api_token_secret: ${{ secrets.PM_API_TOKEN_SECRET }}
+      PROXMOX_VE_ENDPOINT: ${{ secrets.PM_API_URL }}
+      PROXMOX_VE_API_TOKEN: "${{ secrets.PM_API_TOKEN_ID }}=${{ secrets.PM_API_TOKEN_SECRET }}"
       TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
+      
+      LOCAL_STATE_FILE: "${{ matrix.env }}.tfstate"
+      PERSISTENT_STATE_DIR: "/home/github/persistent-tf-state/${{ matrix.project_dir }}"
+      PERSISTENT_STATE_FILE: "/home/github/persistent-tf-state/${{ matrix.project_dir }}/${{ matrix.env }}.tfstate"
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.project_dir }}
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Links the existing tracking file from the permanent local disk partition
-      - name: Link Persistent State File
+      - name: Restore Persistent State File
         run: |
-          mkdir -p /home/github/persistent-tf-state
-          if [ -f /home/github/persistent-tf-state/terraform.tfstate ]; then
-            ln -sf /home/github/persistent-tf-state/terraform.tfstate ./terraform.tfstate
-            echo "✅ Swapped in existing persistent state tracking file."
+          if [ -f "${{ env.PERSISTENT_STATE_FILE }}" ]; then
+            cp -f "${{ env.PERSISTENT_STATE_FILE }}" "./${{ env.LOCAL_STATE_FILE }}"
+            echo "✅ Successfully restored matching state track file: ./${{ env.LOCAL_STATE_FILE }}"
           fi
 
       - name: Terraform Init
         run: terraform init
 
       - name: Terraform Plan
-        run: terraform plan
+        run: |
+          terraform plan -var-file="${{ matrix.env }}.tfvars" -state="${{ env.LOCAL_STATE_FILE }}"
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve
+        run: |
+          terraform apply -var-file="${{ matrix.env }}.tfvars" -state="${{ env.LOCAL_STATE_FILE }}" -auto-approve
 
-      # FIX: Removed the broken 'cp' command. If a new state was generated, 
-      # copy it only if it's a real file, otherwise break the link cleanly.
       - name: Save State Post-Apply
         if: always()
         run: |
-          if [ -f ./terraform.tfstate ] && [ ! -L ./terraform.tfstate ]; then
-            cp -f ./terraform.tfstate /home/github/persistent-tf-state/terraform.tfstate
-            echo "💾 Securely stored new state metadata onto persistent disk."
-          elif [ -L ./terraform.tfstate ]; then
-            rm -f ./terraform.tfstate
-            echo "✅ Persistent state verified and link cleaned up safely."
+          if [ -f "./${{ env.LOCAL_STATE_FILE }}" ]; then
+            mkdir -p "${{ env.PERSISTENT_STATE_DIR }}"
+            cp -f "./${{ env.LOCAL_STATE_FILE }}" "${{ env.PERSISTENT_STATE_FILE }}"
+            echo "💾 Securely stored state metadata onto persistent runner disk."
           fi
+
+  # STEP 3: Automatically find and terminate containers whose .tfvars files were deleted
+  prune:
+    name: "Auto-Prune Deleted Projects"
+    needs: terraform
+    runs-on: self-hosted
+    if: always() # Runs even if the deploy steps have no changes
+    env:
+      PROXMOX_VE_ENDPOINT: ${{ secrets.PM_API_URL }}
+      PROXMOX_VE_API_TOKEN: "${{ secrets.PM_API_TOKEN_ID }}=${{ secrets.PM_API_TOKEN_SECRET }}"
+      TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Find and Destroy Orphan Infrastructure
+        run: |
+          BASE_STATE_DIR="/home/github/persistent-tf-state/projects"
+          
+          if [ ! -d "$BASE_STATE_DIR" ]; then
+            echo "ℹ️ No persistent state directory discovered. Skipping pruning stage."
+            exit 0
+          fi
+
+          # Scan all backup .tfstate paths on your runner machine's hard disk
+          find "$BASE_STATE_DIR" -type f -name "*.tfstate" | while read -r state_path; do
+            
+            # Extract project directory and environment name from the hard disk path
+            # Example path: /home/github/persistent-tf-state/projects/app-cluster/dev.tfstate
+            RELATIVE_PATH=$(echo "$state_path" | sed "s|$BASE_STATE_DIR/||")
+            PROJECT_NAME=$(dirname "$RELATIVE_PATH")
+            ENV_NAME=$(basename "$RELATIVE_PATH" .tfstate)
+            
+            REPO_PROJECT_DIR="projects/$PROJECT_NAME"
+            REPO_TFVARS_FILE="$REPO_PROJECT_DIR/$ENV_NAME.tfvars"
+
+            echo "🔍 Checking infrastructure tracking for: $REPO_TFVARS_FILE"
+
+            # If the state file exists on disk, but the variable file is missing in git repository:
+            if [ ! -f "$REPO_TFVARS_FILE" ]; then
+              echo "⚠️ Detected a deleted configuration! Terminating matching Proxmox container..."
+              
+              cd "$REPO_PROJECT_DIR"
+              terraform init
+              
+              # Copy the ghost state file directly into the folder to let terraform find it
+              cp -f "$state_path" "./$ENV_NAME.tfstate"
+              
+              # Run destroy to wipe the container from your Proxmox node completely
+              # Note: We pass a blank string to variables since the .tfvars file doesn't exist anymore
+              terraform destroy \
+                -state="$ENV_NAME.tfstate" \
+                -var="target_node=dummy" \
+                -var="hostname=dummy" \
+                -var="disk_size_gb=0" \
+                -var="cpu_cores=0" \
+                -auto-approve
+              
+              # Delete the persistent state backup file so it never loops again
+              rm -f "$state_path"
+              echo "🧹 Clean up complete. Container terminated and workspace tracker purged."
+              
+              # Return to base workspace root directory
+              cd - > /dev/null
+            else
+              echo "✅ Workspace configuration verified as active in repository."
+            fi
+          done
