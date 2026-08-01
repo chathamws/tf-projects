@@ -6,55 +6,91 @@ on:
       - main
 
 jobs:
-  terraform:
-    name: "Terraform Apply"
+  # JOB 1: Automatically find all projects and their environment files
+  discover:
+    name: "Discover Projects"
     runs-on: self-hosted
-    
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Scan Infrastructure Directories
+        id: set-matrix
+        run: |
+          # Finds all *.tfvars files under projects/
+          # Extracts the project folder and the exact environment name cleanly into JSON
+          JSON_OUTPUT=$(find projects -type f -name "*.tfvars" | jq -R -s -c '
+            split("\n") | map(select(length > 0)) | map({
+              project_dir: (split("/")[:-1] | join("/")),
+              env: (split("/")[-1] | split(".")[0])
+            })
+          ')
+          echo "Discovered configuration targets: $JSON_OUTPUT"
+          echo "matrix=$JSON_OUTPUT" >> $GITHUB_OUTPUT
+
+  # JOB 2: Run deployment loops using the dynamically generated matrix data
+  terraform:
+    name: "Deploy"
+    needs: discover
+    runs-on: self-hosted
+    strategy:
+      fail-fast: false # A failure in one project wont stop unrelated project jobs
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.matrix) }}
+        
     env:
-      # Target execution directory definition
-      TF_WORKING_DIR: "projects/app-cluster/dev"
-      # State management tracking paths
-      PERSISTENT_STATE_DIR: "/home/github/persistent-tf-state/app-cluster/dev"
-      
       # Native bpg/proxmox environment variable layout
       PROXMOX_VE_ENDPOINT: ${{ secrets.PM_API_URL }}
       PROXMOX_VE_API_TOKEN: "${{ secrets.PM_API_TOKEN_ID }}=${{ secrets.PM_API_TOKEN_SECRET }}"
-      
-      # App configurations
       TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
+      
+      # Dynamically derived tracking variables
+      LOCAL_STATE_FILE: "${{ matrix.env }}.tfstate"
+      PERSISTENT_STATE_DIR: "/home/github/persistent-tf-state/${{ matrix.project_dir }}"
+      PERSISTENT_STATE_FILE: "/home/github/persistent-tf-state/${{ matrix.project_dir }}/${{ matrix.env }}.tfstate"
 
     defaults:
       run:
-        working-directory: ${{ env.TF_WORKING_DIR }}
+        working-directory: ${{ matrix.project_dir }}
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Link Persistent State File
+      - name: Restore Persistent State File
         run: |
-          mkdir -p ${{ env.PERSISTENT_STATE_DIR }}
-          if [ -f ${{ env.PERSISTENT_STATE_DIR }}/terraform.tfstate ]; then
-            ln -sf ${{ env.PERSISTENT_STATE_DIR }}/terraform.tfstate ./terraform.tfstate
-            echo "✅ Swapped in existing persistent state tracking file."
+          # Inject prior deployment state mapping if it exists on disk
+          if [ -f "${{ env.PERSISTENT_STATE_FILE }}" ]; then
+            cp -f "${{ env.PERSISTENT_STATE_FILE }}" "./${{ env.LOCAL_STATE_FILE }}"
+            echo "✅ Successfully restored existing state file for environmental target: ${{ matrix.env }}"
+          else
+            echo "ℹ️ No existing persistent state discovered. Starting raw generation block."
           fi
 
       - name: Terraform Init
         run: terraform init
 
       - name: Terraform Plan
-        run: terraform plan
+        run: |
+          terraform plan \
+            -var-file="${{ matrix.env }}.tfvars" \
+            -state="${{ env.LOCAL_STATE_FILE }}"
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve
+        run: |
+          terraform apply \
+            -var-file="${{ matrix.env }}.tfvars" \
+            -state="${{ env.LOCAL_STATE_FILE }}" \
+            -auto-approve
 
       - name: Save State Post-Apply
         if: always()
         run: |
-          if [ -f ./terraform.tfstate ] && [ ! -L ./terraform.tfstate ]; then
-            cp -f ./terraform.tfstate ${{ env.PERSISTENT_STATE_DIR }}/terraform.tfstate
-            echo "💾 Securely stored new state metadata onto persistent disk."
-          elif [ -L ./terraform.tfstate ]; then
-            rm -f ./terraform.tfstate
-            echo "✅ Persistent state verified and link cleaned up safely."
+          # Copy the state securely back to long term file tracking
+          if [ -f "./${{ env.LOCAL_STATE_FILE }}" ]; then
+            mkdir -p "${{ env.PERSISTENT_STATE_DIR }}"
+            cp -f "./${{ env.LOCAL_STATE_FILE }}" "${{ env.PERSISTENT_STATE_FILE }}"
+            echo "💾 Securely stored new state metadata onto persistent disk location."
           fi
