@@ -11,6 +11,7 @@ jobs:
     runs-on: self-hosted
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      has_projects: ${{ steps.set-matrix.outputs.has_projects }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -19,22 +20,36 @@ jobs:
         id: set-matrix
         run: |
           # 💎 FIXED: Combines stable bash file-mapping with standard compliant jq parsing
-          JSON_OUTPUT=$(find projects -type f -name "*.tfvars" | while read -r file; do
-            DIR=$(dirname "$file")
-            FILE_NAME=$(basename "$file")
-            ENV="${FILE_NAME%.tfvars}"
-            echo "$DIR:$ENV"
-          done | jq -R -s -c '
-            split("\n") 
-            | map(select(length > 0)) 
-            | map(split(":")) 
-            | map({project_dir: .[0], env: .[1]})
-          ')
-          echo "matrix=$JSON_OUTPUT" >> $GITHUB_OUTPUT
+          # Scans for *.tfvars files and builds a matrix of project_dir + env pairs
+          TFVAR_FILES=$(find projects -type f -name "*.tfvars")
+          FILE_COUNT=$(echo "$TFVAR_FILES" | grep -c . || true)
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "⚠️ No .tfvars files found in projects/. Skipping terraform deployment."
+            echo "has_projects=false" >> $GITHUB_OUTPUT
+            # Output a placeholder so fromJson() never receives an empty array
+            echo 'matrix=[{"project_dir":".","env":"skip"}]' >> $GITHUB_OUTPUT
+          else
+            echo "✅ Found $FILE_COUNT .tfvars file(s). Building deployment matrix."
+            echo "has_projects=true" >> $GITHUB_OUTPUT
+            JSON_OUTPUT=$(echo "$TFVAR_FILES" | while read -r file; do
+              DIR=$(dirname "$file")
+              FILE_NAME=$(basename "$file")
+              ENV="${FILE_NAME%.tfvars}"
+              echo "$DIR:$ENV"
+            done | jq -R -s -c '
+              split("\n") 
+              | map(select(length > 0)) 
+              | map(split(":")) 
+              | map({project_dir: .[0], env: .[1]})
+            ')
+            echo "matrix=$JSON_OUTPUT" >> $GITHUB_OUTPUT
+          fi
 
   terraform:
     name: "Deploy"
     needs: discover
+    if: needs.discover.outputs.has_projects == 'true'
     runs-on: self-hosted
     strategy:
       fail-fast: false
