@@ -15,5 +15,11 @@ locals {
       disk_size_gb = 8
       cpu_cores    = 1
     }
+    stg = {
+      target_node  = "pve1"
+      hostname     = "test2-stg"
+      disk_size_gb = 8
+      cpu_cores    = 1
+    }
   }
 }
