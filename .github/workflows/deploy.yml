@@ -104,8 +104,8 @@ jobs:
       - name: Recover Deleted Project Code
         working-directory: ${{ github.workspace }}
         run: |
-          # Find the last commit where this project directory existed
-          LAST_COMMIT=$(git log --all --format=%H -- "${{ matrix.project_dir }}/" | head -1)
+          # Find the last commit where this project directory existed (skip deletion commits)
+          LAST_COMMIT=$(git log --all --diff-filter=d --format=%H -- "${{ matrix.project_dir }}/" | head -1)
           if [ -z "$LAST_COMMIT" ]; then
             echo "Could not find project code in git history. Manual cleanup required."
             echo "   State file: ${{ env.PERSISTENT_STATE_FILE }}"
