@@ -5,14 +5,17 @@ Terraform-managed Proxmox LXC containers, organized as reusable modules + per-pr
 ## Structure
 
 ```
-modules/proxmox_lxc/     # Reusable LXC container module
-projects/app-cluster/    # App-cluster project (dev + prod)
-projects/test-app/       # Test-app project (dev + prod)
+modules/proxmox_lxc/       # Reusable LXC container module
+projects/app-cluster/      # App-cluster project (dev + prod via for_each)
 ```
 
-## How Workspaces Work
+## Architecture
 
-Each project defines its environments (workspaces) as a `locals` map in `workspaces.tf`:
+Each project manages **all its environments** (dev, prod, etc.) in a single Terraform state using `for_each`. A single `terraform apply` creates, updates, or destroys all environment instances atomically — no separate state files, no `.tfvars` files, no workspace switching.
+
+### How Workspaces Work
+
+Each project defines its environments as a `locals` map in `workspaces.tf`:
 
 ```hcl
 locals {
@@ -72,4 +75,14 @@ Terraform will detect that the resource instance is no longer declared and **aut
 
 ### Applying changes to all workspaces
 
-A single `terraform apply` creates/updates/destroys all workspace instances in one run — no need to switch between Terraform workspaces or pass separate `.tfvars` files.
+A single `terraform apply` creates/updates/destroys all workspace instances in one run.
+
+## CI/CD
+
+The GitHub Actions workflow (`.github/workflows/deploy.yml`) automatically:
+
+1. **Discovers** all project directories under `projects/` containing `main.tf`
+2. **Deploys** each project sequentially (one `terraform apply` per project)
+3. **Persists** state files on the self-hosted runner's local disk between runs
+
+Sensitive variables (`container_root_password`, Proxmox API credentials) are injected via GitHub Secrets and `TF_VAR_*` environment variables — no `.tfvars` files needed.
