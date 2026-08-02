@@ -82,7 +82,20 @@ A single `terraform apply` creates/updates/destroys all workspace instances in o
 The GitHub Actions workflow (`.github/workflows/deploy.yml`) automatically:
 
 1. **Discovers** all project directories under `projects/` containing `main.tf`
-2. **Deploys** each project sequentially (one `terraform apply` per project)
-3. **Persists** state files on the self-hosted runner's local disk between runs
+2. **Decommissions** any projects that were deleted from the repo (recovers code from git history, runs `terraform destroy`, cleans up state)
+3. **Deploys** each remaining project sequentially (one `terraform apply` per project)
+4. **Persists** state files on the self-hosted runner's local disk between runs
 
 Sensitive variables (`container_root_password`, Proxmox API credentials) are injected via GitHub Secrets and `TF_VAR_*` environment variables — no `.tfvars` files needed.
+
+### Decommissioning a Project
+
+To decommission an entire project and destroy all its infrastructure:
+
+1. **Delete the project directory** from `projects/` and push to `main`
+2. The workflow detects the orphaned state file on the runner
+3. It recovers the deleted project code from git history
+4. Runs `terraform destroy` to terminate all LXC containers
+5. Cleans up the persistent state directory
+
+No manual intervention needed — just delete the directory and push.

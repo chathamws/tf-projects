@@ -10,52 +10,153 @@ jobs:
     name: "Discover Projects"
     runs-on: self-hosted
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-      has_projects: ${{ steps.set-matrix.outputs.has_projects }}
+      deploy_matrix: ${{ steps.scan.outputs.deploy_matrix }}
+      has_projects: ${{ steps.scan.outputs.has_projects }}
+      decommission_matrix: ${{ steps.scan.outputs.decommission_matrix }}
+      has_orphans: ${{ steps.scan.outputs.has_orphans }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Scan Infrastructure Directories
-        id: set-matrix
+      - name: Scan for Projects and Orphaned State
+        id: scan
         run: |
-          # Scans for project directories containing main.tf under projects/
-          # Each project manages ALL its environments (dev, prod, etc.) via for_each in a single apply
+          # --- Find current projects to deploy ---
           PROJECT_DIRS=$(find projects -maxdepth 2 -name "main.tf" -exec dirname {} \; | sort)
           PROJECT_COUNT=$(echo "$PROJECT_DIRS" | grep -c . || true)
 
           if [ "$PROJECT_COUNT" -eq 0 ]; then
-            echo "⚠️ No projects found under projects/. Skipping terraform deployment."
+            echo "⚠️ No projects found under projects/. Skipping deploy."
             echo "has_projects=false" >> $GITHUB_OUTPUT
-            echo 'matrix=[{"project_dir":"."}]' >> $GITHUB_OUTPUT
+            echo 'deploy_matrix=[{"project_dir":"."}]' >> $GITHUB_OUTPUT
           else
-            echo "✅ Found $PROJECT_COUNT project(s). Building deployment matrix."
+            echo "✅ Found $PROJECT_COUNT project(s) to deploy."
             echo "has_projects=true" >> $GITHUB_OUTPUT
-            JSON_OUTPUT=$(echo "$PROJECT_DIRS" | jq -R -s -c '
+            DEPLOY_JSON=$(echo "$PROJECT_DIRS" | jq -R -s -c '
               split("\n")
               | map(select(length > 0))
               | map({project_dir: .})
             ')
-            echo "matrix=$JSON_OUTPUT" >> $GITHUB_OUTPUT
+            echo "deploy_matrix=$DEPLOY_JSON" >> $GITHUB_OUTPUT
           fi
 
-  terraform:
-    name: "Deploy (${{ matrix.project_dir }})"
+          # --- Find orphaned state directories to decommission ---
+          # A state dir is orphaned if it exists on disk but the project dir is gone from the repo
+          STATE_BASE="/home/github/persistent-tf-state"
+          ORPHANS=""
+          if [ -d "$STATE_BASE/projects" ]; then
+            for state_file in "$STATE_BASE"/projects/*/terraform.tfstate; do
+              [ -f "$state_file" ] || continue
+              PROJECT_NAME=$(basename "$(dirname "$state_file")")
+              if [ ! -f "projects/$PROJECT_NAME/main.tf" ]; then
+                echo "🗑️  Orphaned state found: projects/$PROJECT_NAME (no longer in repo)"
+                ORPHANS="$ORPHANS projects/$PROJECT_NAME"
+              fi
+            done
+          fi
+
+          ORPHAN_COUNT=$(echo "$ORPHANS" | grep -c . || true)
+          if [ "$ORPHAN_COUNT" -eq 0 ]; then
+            echo "✅ No orphaned state directories found."
+            echo "has_orphans=false" >> $GITHUB_OUTPUT
+            echo 'decommission_matrix=[{"project_dir":"."}]' >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Found $ORPHAN_COUNT orphaned project(s) to decommission."
+            echo "has_orphans=true" >> $GITHUB_OUTPUT
+            DECOMMISSION_JSON=$(echo "$ORPHANS" | jq -R -s -c '
+              split("\n")
+              | map(select(length > 0))
+              | map({project_dir: .})
+            ')
+            echo "decommission_matrix=$DECOMMISSION_JSON" >> $GITHUB_OUTPUT
+          fi
+
+  decommission:
+    name: "Decommission (${{ matrix.project_dir }})"
     needs: discover
-    if: needs.discover.outputs.has_projects == 'true'
+    if: needs.discover.outputs.has_orphans == 'true'
     runs-on: self-hosted
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
-        include: ${{ fromJson(needs.discover.outputs.matrix) }}
+        include: ${{ fromJson(needs.discover.outputs.decommission_matrix) }}
 
     env:
       PROXMOX_VE_ENDPOINT: ${{ secrets.PM_API_URL }}
       PROXMOX_VE_API_TOKEN: "${{ secrets.PM_API_TOKEN_ID }}=${{ secrets.PM_API_TOKEN_SECRET }}"
       TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
+      LOCAL_STATE_FILE: "terraform.tfstate"
+      PERSISTENT_STATE_DIR: "/home/github/persistent-tf-state/${{ matrix.project_dir }}"
+      PERSISTENT_STATE_FILE: "/home/github/persistent-tf-state/${{ matrix.project_dir }}/terraform.tfstate"
 
-      # Single state file per project — for_each handles all environments atomically
+    defaults:
+      run:
+        working-directory: ${{ matrix.project_dir }}
+
+    steps:
+      - name: Checkout Code (Full History)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Need full history to recover deleted project code
+
+      - name: Recover Deleted Project Code
+        working-directory: ${{ github.workspace }}
+        run: |
+          # Find the last commit where this project directory existed
+          LAST_COMMIT=$(git log --all --format=%H -- "${{ matrix.project_dir }}/" | head -1)
+          if [ -z "$LAST_COMMIT" ]; then
+            echo "❌ Could not find project code in git history. Manual cleanup required."
+            echo "   State file: ${{ env.PERSISTENT_STATE_FILE }}"
+            exit 1
+          fi
+          echo "📦 Recovering code from commit $LAST_COMMIT"
+          git checkout "$LAST_COMMIT" -- "${{ matrix.project_dir }}/"
+
+      - name: Restore Persistent State File
+        id: restore-state
+        run: |
+          if [ -f "${{ env.PERSISTENT_STATE_FILE }}" ]; then
+            cp -f "${{ env.PERSISTENT_STATE_FILE }}" "./${{ env.LOCAL_STATE_FILE }}"
+            echo "✅ Restored state: ${{ env.PERSISTENT_STATE_FILE }}"
+            echo "has_state=true" >> $GITHUB_OUTPUT
+          else
+            echo "ℹ️ No persistent state found. Nothing to destroy."
+            echo "has_state=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Terraform Init
+        if: steps.restore-state.outputs.has_state == 'true'
+        run: terraform init
+
+      - name: Terraform Destroy
+        if: steps.restore-state.outputs.has_state == 'true'
+        run: |
+          terraform destroy \
+            -state="${{ env.LOCAL_STATE_FILE }}" \
+            -auto-approve
+
+      - name: Cleanup Orphaned State
+        if: success()
+        run: |
+          rm -rf "${{ env.PERSISTENT_STATE_DIR }}"
+          echo "🧹 Cleaned up persistent state: ${{ env.PERSISTENT_STATE_DIR }}"
+
+  terraform:
+    name: "Deploy (${{ matrix.project_dir }})"
+    needs: [discover, decommission]
+    if: always() && needs.discover.outputs.has_projects == 'true'
+    runs-on: self-hosted
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.deploy_matrix) }}
+
+    env:
+      PROXMOX_VE_ENDPOINT: ${{ secrets.PM_API_URL }}
+      PROXMOX_VE_API_TOKEN: "${{ secrets.PM_API_TOKEN_ID }}=${{ secrets.PM_API_TOKEN_SECRET }}"
+      TF_VAR_container_root_password: ${{ secrets.TF_VAR_container_root_password }}
       LOCAL_STATE_FILE: "terraform.tfstate"
       PERSISTENT_STATE_DIR: "/home/github/persistent-tf-state/${{ matrix.project_dir }}"
       PERSISTENT_STATE_FILE: "/home/github/persistent-tf-state/${{ matrix.project_dir }}/terraform.tfstate"
